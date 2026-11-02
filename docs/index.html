@@ -6199,6 +6199,46 @@ function tfRestoreState(st) {
 
 // ---- modal transform ----
 const AXES = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+// constraint guide: a line through the pivot along the locked axis, plus an arrow for "positive"
+const tfGuide = new THREE.Group();
+tfGuide.visible = false;
+const guideMat = new LineMaterial({ color: 0xffffff, linewidth: 2.2, transparent: true, opacity: 0.85, depthTest: false, depthWrite: false });
+guideMat.resolution.set(c3d.clientWidth || 1, c3d.clientHeight || 1);
+lineMats.push(guideMat);
+const guideLine = new LineSegments2(new LineSegmentsGeometry(), guideMat);
+guideLine.renderOrder = 20; guideLine.frustumCulled = false;
+const guideArrow = new THREE.ArrowHelper(new THREE.Vector3(0, 0, 1), new THREE.Vector3(), 1, 0xffffff, 0.32, 0.2);
+guideArrow.renderOrder = 21;
+for (const c of [guideArrow.line, guideArrow.cone]) { c.material.depthTest = false; c.material.depthWrite = false; c.material.transparent = true; c.renderOrder = 21; }
+tfGuide.add(guideLine, guideArrow);
+scene.add(tfGuide);
+const GUIDE_COLORS = [0xf2506b, 0x86cf38, 0x4b9df6];
+function updateGuide(t) {
+  const ax = t && t.kind !== 'shrink' && !t.plane ? tfAxisVec(t) : null;
+  if (!ax) { tfGuide.visible = false; return; }
+  const piv = t.st.pivot;
+  const L = Math.max(CAM.dist * 50, 500);
+  const a = piv.clone().addScaledVector(ax, -L), b = piv.clone().addScaledVector(ax, L);
+  guideLine.geometry.dispose();
+  guideLine.geometry = new LineSegmentsGeometry();
+  guideLine.geometry.setPositions([a.x, a.y, a.z, b.x, b.y, b.z]);
+  const col = t.axis === null ? 0xffb35c : GUIDE_COLORS[t.axis];
+  guideMat.color.setHex(col);
+  guideArrow.visible = t.kind === 'move';
+  if (t.kind === 'move' && t.customAxis && t.axis === null) {
+    const msg = t.facing ? 'This side faces you: slide up to pull it toward you, down to push it in' : 'Drag along the orange arrow to pull out, the other way to push in';
+    if ($('#hint').textContent !== msg) hint(msg);
+  }
+  if (guideArrow.visible) {
+    const len = worldPerPixel(piv) * 64;
+    guideArrow.position.copy(piv);
+    guideArrow.setDirection(ax);
+    guideArrow.setLength(len, len * 0.32, len * 0.2);
+    guideArrow.setColor(col);
+  }
+  tfGuide.visible = true;
+  requestRender();
+}
 function tfStart(kind, opts = {}) {
   if (TF.active) tfCancel();
   const st = tfBuildState(kind);
@@ -6263,13 +6303,18 @@ function tfCompute(t) {
     }
     const sx = pc.x + (t.ptr.x - t.start.x), sy = pc.y + (t.ptr.y - t.start.y);
     if (ax && !t.plane) {
+      // Finger motion is projected onto the axis as drawn on screen. When the axis points
+      // at (or away from) the viewer its on-screen length shrinks to nothing, so blend in a
+      // steady "slide up = toward you" mapping instead of dividing by a tiny length.
       const s0 = toScreen(piv), s1 = toScreen(piv.clone().add(ax));
-      const dx = s1.x - s0.x, dy = s1.y - s0.y, l2 = dx * dx + dy * dy;
-      let dist;
-      if (l2 < 4) {
-        const hit = rayPlane(sx, sy, piv, camZ);
-        dist = hit ? hit.sub(piv).dot(ax) : 0;
-      } else dist = ((t.ptr.x - t.start.x) * dx + (t.ptr.y - t.start.y) * dy) / l2;
+      const dx = s1.x - s0.x, dy = s1.y - s0.y, len = Math.hypot(dx, dy);
+      const wpp = worldPerPixel(piv);
+      const r = len * wpp;                            // 1: axis lies in the screen, 0: points at you
+      const pxPerUnit = Math.max(len, 0.85 / wpp);       // same finger speed from any angle
+      const toward = ax.dot(camZ) >= 0 ? 1 : -1;
+      const ux = r > 0.02 ? dx / len : 0, uy = r > 0.02 ? dy / len : -toward;
+      let dist = ((t.ptr.x - t.start.x) * ux + (t.ptr.y - t.start.y) * uy) / pxPerUnit;
+      t.facing = r <= 0.3;
       if (t.snap) dist = snapTo(dist, S.snapMove);
       T = ax.clone().multiplyScalar(dist);
       t.value = { T, txt: `D ${fmt(dist)} along ${'XYZ'[t.axis] ?? 'normal'}` };
@@ -6343,11 +6388,13 @@ function tfUpdate() {
   } else tfApplyState(t.st, v);
   const info = $('#tfInfo');
   if (info) info.textContent = v.txt;
+  updateGuide(t);
 }
 function tfConfirm() {
   const t = TF.active;
   if (!t) return;
   TF.active = null;
+  tfGuide.visible = false;
   tfHideBar();
   pushUndo(t.undoLabel || t.label);
   if (t.onConfirm) t.onConfirm();
@@ -6357,6 +6404,7 @@ function tfCancel() {
   const t = TF.active;
   if (!t) return;
   TF.active = null;
+  tfGuide.visible = false;
   tfRestoreState(t.st);
   tfHideBar();
   if (t.onCancel) t.onCancel();
@@ -6408,7 +6456,9 @@ function tfShowBar(refreshOnly) {
   bar.append(inp, neg, snap, h('span', { class: 'grow' }), cancel, ok);
   bar.hidden = false;
   $('#shelf').hidden = true;
-  if (!refreshOnly) hint('Drag anywhere to ' + t.label.toLowerCase() + ' · two fingers still orbit/zoom');
+  if (!refreshOnly) hint(t.customAxis && t.kind === 'move'
+    ? 'Drag along the orange arrow to pull out, the other way to push in'
+    : 'Drag anywhere to ' + t.label.toLowerCase() + ' · two fingers still orbit/zoom');
   else hint(null);
 }
 function tfHideBar() {
@@ -9055,7 +9105,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { S, CAM, UNDO, editSelectAll, runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { S, CAM, UNDO, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();
