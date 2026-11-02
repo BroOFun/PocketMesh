@@ -1,0 +1,16 @@
+{
+  "name": "pocketmesh-export-tests",
+  "version": "1.0.0",
+  "description": "Tests for src/export.js",
+  "scripts": {
+    "test:export": "node run-tests.cjs && node browser-test.cjs",
+    "test:export:node": "node run-tests.cjs",
+    "test:export:browser": "node browser-test.cjs"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "gltf-validator": "^2.0.0-dev.3.10",
+    "three": "^0.160.0"
+  },
+  "private": true
+}

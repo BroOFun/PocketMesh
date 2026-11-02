@@ -1,0 +1,18 @@
+{
+  "name": "pocketmesh",
+  "version": "1.0.0",
+  "description": "Blender-style polygon modeler that installs on iPhone",
+  "directories": {
+    "doc": "docs",
+    "test": "test"
+  },
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node test/mesh.test.mjs && node test/uv.test.mjs"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "three": "0.160.0"
+  },
+  "private": true
+}
