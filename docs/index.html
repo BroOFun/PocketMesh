@@ -260,6 +260,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
     <section class="pane" id="pane3d">
       <canvas class="view" id="c3d"></canvas>
       <canvas class="view" id="rulerCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
+      <canvas class="view" id="knifeCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
       <canvas class="view" id="trackCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
       <div class="ovl" id="stats"></div>
       <div class="ovl toolcol" id="tools"></div>
@@ -1821,6 +1822,119 @@ function extractFaces(m, fset) {
 function looseParts(m) {
   const all = new Set(); for (let i = 0; i < m.verts.length; i++) all.add(i);
   return vertIslands(m, all);
+}
+
+// ==== knife.js ====
+// Screen-space knife segments, with perspective-correct edge splits. Endpoints
+// are on mesh boundaries; visibility is supplied by the viewport. Pure/atomic:
+// the input mesh is never changed, including when a cut cannot be made.
+const _knCross = (a, b) => a[0] * b[1] - a[1] * b[0];
+function _knInside(p, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const a = poly[j], b = poly[i], dx = b.x - a.x, dy = b.y - a.y;
+    const l2 = dx * dx + dy * dy;
+    const t = l2 ? ((p.x - a.x) * dx + (p.y - a.y) * dy) / l2 : -1;
+    if (t >= 0 && t <= 1 && Math.hypot(p.x - a.x - t * dx, p.y - a.y - t * dy) < 1e-6) return false;
+    if ((a.y > p.y) !== (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+  }
+  return inside;
+}
+function knifeCutProjected(mesh, projected, from, to, visible = () => true) {
+  const d = [to.x - from.x, to.y - from.y], length = Math.hypot(...d), eps = 1e-8;
+  if (!Number.isFinite(length) || length < 1e-5) return null;
+  const plans = [];
+  mesh.faces.forEach((f, fi) => {
+    const poly = f.v.map(v => projected[v]);
+    if (poly.some(p => !p || !p.valid || !(p.w > 0))) return;
+    const hits = [];
+    const add = (a, b, s, t) => {
+      if (t < -eps || t > 1 + eps || s < -eps || s > 1 + eps) return;
+      t = Math.max(0, Math.min(1, t)); s = Math.max(0, Math.min(1, s));
+      if (s < eps) hits.push({t, v: a});
+      else if (s > 1 - eps) hits.push({t, v: b});
+      else {
+        // Canonical orientation gives both sides of a shared edge the same split.
+        if (a > b) { [a, b] = [b, a]; s = 1 - s; }
+        const wa = projected[a].w, wb = projected[b].w;
+        const u = s * wa / ((1 - s) * wb + s * wa);
+        hits.push({t, a, b, u, key: ekey(a, b)});
+      }
+    };
+    for (let i = 0; i < f.v.length; i++) {
+      const a = f.v[i], b = f.v[(i + 1) % f.v.length], p = projected[a], q = projected[b];
+      const e = [q.x - p.x, q.y - p.y], v = [p.x - from.x, p.y - from.y], den = _knCross(d, e);
+      if (Math.abs(den) <= 1e-12 * length * Math.max(1, Math.hypot(...e))) {
+        if (Math.abs(_knCross(v, d)) / length < 1e-6) {
+          add(a, b, 0, (v[0] * d[0] + v[1] * d[1]) / (length * length));
+          add(a, b, 1, ((q.x - from.x) * d[0] + (q.y - from.y) * d[1]) / (length * length));
+        }
+      } else add(a, b, _knCross(v, d) / den, _knCross(v, e) / den);
+    }
+    hits.sort((a, b) => a.t - b.t || (a.v === undefined) - (b.v === undefined));
+    const unique = hits.filter((p, i) => !i || Math.abs(p.t - hits[i - 1].t) * length > 1e-6);
+    for (let i = 0; i + 1 < unique.length; i++) {
+      const a = unique[i], b = unique[i + 1], t = (a.t + b.t) / 2;
+      if (!_knInside({x: from.x + t * d[0], y: from.y + t * d[1]}, poly)) continue;
+      const point = hit => hit.v !== undefined ? mesh.verts[hit.v] : vlerp(mesh.verts[hit.a], mesh.verts[hit.b], hit.u);
+      if (!visible(fi, point(a), point(b))) continue;
+      plans.push({fi, a, b});
+    }
+  });
+  if (!plans.length) return null;
+  const result = cloneMesh(mesh), splits = new Map(), edges = new Set();
+  const vertex = hit => {
+    if (hit.v !== undefined) return hit.v;
+    let list = splits.get(hit.key);
+    if (!list) splits.set(hit.key, list = []);
+    let split = list.find(p => Math.abs(p.u - hit.u) < 1e-10);
+    if (!split) {
+      split = {u: hit.u, v: result.verts.length}; list.push(split);
+      result.verts.push(vlerp(mesh.verts[hit.a], mesh.verts[hit.b], hit.u));
+    }
+    return split.v;
+  };
+  for (const plan of plans) { plan.va = vertex(plan.a); plan.vb = vertex(plan.b); }
+  for (const list of splits.values()) list.sort((a, b) => a.u - b.u);
+  // Insert a shared edge vertex into every adjacent face, interpolating each
+  // face's UVs separately so existing UV seams remain intact.
+  const expanded = mesh.faces.map(f => {
+    const v = [], uv = [];
+    for (let i = 0; i < f.v.length; i++) {
+      const j = (i + 1) % f.v.length, a = f.v[i], b = f.v[j];
+      v.push(a); uv.push(f.uv[i].slice());
+      const list = splits.get(ekey(a, b)) || [];
+      for (const p of (a < b ? list : [...list].reverse())) {
+        v.push(p.v); uv.push(uvlerp(f.uv[i], f.uv[j], a < b ? p.u : 1 - p.u));
+      }
+    }
+    return [{...f, v, uv}];
+  });
+  for (const {fi, va, vb} of plans) {
+    const parts = expanded[fi], idx = parts.findIndex(f => f.v.includes(va) && f.v.includes(vb));
+    if (idx < 0) return null;
+    const f = parts[idx];
+    let a = f.v.indexOf(va), b = f.v.indexOf(vb);
+    if (a > b) [a, b] = [b, a];
+    if (b - a < 2 || b - a > f.v.length - 2) continue;
+    const one = {...f, v: f.v.slice(a, b + 1), uv: f.uv.slice(a, b + 1)};
+    const two = {...f, v: f.v.slice(b).concat(f.v.slice(0, a + 1)), uv: f.uv.slice(b).concat(f.uv.slice(0, a + 1))};
+    const minArea = faceArea(mesh, mesh.faces[fi]) * 1e-10;
+    if (!(faceArea(result, one) > minArea && faceArea(result, two) > minArea)) return null;
+    parts.splice(idx, 1, one, two); edges.add(ekey(va, vb));
+  }
+  if (!edges.size) return null;
+  result.faces = expanded.flat();
+  const replacements = new Map();
+  for (const [key, list] of splits) {
+    const [a, b] = ekeySplit(key), chain = [a, ...list.map(p => p.v), b];
+    replacements.set(key, chain.slice(1).map((v, i) => ekey(chain[i], v)));
+    for (const tags of [result.seams, result.creases]) if (tags.delete(key)) {
+      for (let i = 0; i < chain.length - 1; i++) tags.add(ekey(chain[i], chain[i + 1]));
+    }
+  }
+  cleanEdges(result);
+  return {mesh: result, edges, replacements};
 }
 
 // ==== extrude.js ====
@@ -6728,6 +6842,7 @@ function h(tag, attrs = {}, ...kids) {
 
 // ---------- icons ----------
 const ICONS = {
+  knife: '<path d="m14 3 7 7-8 8-4-4z"/><path d="m9 14-6 7 8-3M12 5l7 7"/>',
   ruler: '<path d="m3 16 13-13 5 5L8 21zM7 12l2 2m2-6 2 2m2-6 2 2"/>',
   menu: '<path d="M4 6.5h16M4 12h16M4 17.5h16"/>',
   undo: '<path d="M9 13.5 4.5 9 9 4.5"/><path d="M4.5 9H14a5.5 5.5 0 0 1 0 11h-3"/>',
@@ -7595,6 +7710,7 @@ function snapshot() {
   };
 }
 function restore(snap) {
+  knifeReset();
   const keep = new Map(S.objects.map((o) => [o.id, o]));
   const next = [];
   for (const so of snap.objects) {
@@ -7696,6 +7812,7 @@ function frame(now) {
   renderer.render(scene, camera);
   drawNav();
   drawRuler();
+  drawKnife();
   drawTrack();
 }
 
@@ -7948,6 +8065,7 @@ function updateGuide(t) {
   requestRender();
 }
 function tfStart(kind, opts = {}) {
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();
   const st = tfBuildState(kind);
   if (!st) { toast(S.mode === 'edit' ? 'Select some geometry first' : 'Select an object first', true); return false; }
@@ -8306,6 +8424,7 @@ function setLastOp(label, params, schema, fn) {
 }
 // run an operator: fn(params) mutates state, returns false on failure
 function runOp(label, fn, params = {}, schema = null) {
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
   let ok;
@@ -8370,6 +8489,7 @@ function addPrimitive(type) {
 // ---------- extrude / duplicate ----------
 function activateExtrude() {
   if (!needEdit()) return;
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
   closeSheet();
@@ -8503,6 +8623,7 @@ function pickEdgeAny(x, y) {
 }
 function opLoopCutStart() {
   if (!needEdit()) return;
+  if (S.tool === 'knife') knifeCancel();
   S.pendingTap = 'loopcut';
   hint('Tap an edge to place a loop cut');
 }
@@ -8923,6 +9044,7 @@ function opHide(kind) {
 
 // ---------- mode switching ----------
 function setMode(mode) {
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
   if (mode === 'edit') {
@@ -9493,6 +9615,7 @@ function serializeProject() {
 }
 async function loadProject(data) {
   if (!data || data.app !== 'PocketMesh' || !Array.isArray(data.objects)) throw new Error('This file is not a PocketMesh project');
+  knifeReset();
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
@@ -9799,6 +9922,122 @@ function openRuler() {
   },{panel:true,kind:'ruler'});
 }
 
+// ==== app_knife.js ====
+// Knife keeps a private preview mesh. Only Apply changes the project/history;
+// cancel, tool changes and editor changes discard the preview safely.
+const KNIFE = {object: null, source: null, mesh: null, first: null, hover: null, edges: new Set(), steps: []};
+function knifeReset() {
+  Object.assign(KNIFE, {object: null, source: null, mesh: null, first: null, hover: null, edges: new Set(), steps: []});
+  if (S.tool === 'knife') S.tool = 'select';
+  requestRender();
+}
+function knifeActive() { return S.tool === 'knife' && S.mode === 'edit' && S.workspace === 'model' && KNIFE.object === S.active && KNIFE.source === S.active?.mesh; }
+function knifeHint() { hint('Tap vertices or edges · Apply to finish'); }
+function knifeActivate() {
+  if (knifeActive()) { knifeHint(); return; }
+  if (!needEdit() || S.workspace !== 'model') return;
+  finishEditorInteraction(); closeSheet(); rulerResetPending();
+  Object.assign(KNIFE, {object: S.active, source: S.active.mesh, mesh: cloneMesh(S.active.mesh), first: null, hover: null, edges: new Set(), steps: []});
+  S.tool = 'knife'; S.pendingTap = null; G.lastTap = null;
+  hideRedoPanel(); buildTools(); buildSubbar(); gizmoSync(); knifeHint(); requestRender();
+}
+function knifeCancel() {
+  knifeReset(); hint(null); buildTools(); buildSubbar(); gizmoSync();
+}
+function knifeApply() {
+  if (!knifeActive()) { knifeCancel(); return; }
+  const {object, mesh, edges} = KNIFE;
+  knifeReset(); hint(null);
+  if (edges.size) runOp('Knife cut', () => {
+    object.mesh = mesh;
+    S.selectMode = 'edge'; S.uvSel.clear(); object.activeFace = null;
+    object.esel = {verts: new Set(), edges: new Set(edges), faces: new Set()};
+    flushSel(object); rebuildObject(object);
+  });
+  onModeChanged(); onSelectionChanged();
+}
+function knifeUndo() {
+  if (!knifeActive()) return;
+  const step = KNIFE.steps.pop();
+  if (step) Object.assign(KNIFE, step);
+  else KNIFE.first = null;
+  KNIFE.hover = null; buildSubbar(); knifeHint(); requestRender();
+}
+function knifeScreen(point) {
+  const o = KNIFE.object, p = new THREE.Vector4(...point, 1).applyMatrix4(o.node.matrixWorld).applyMatrix4(camera.matrixWorldInverse).applyMatrix4(camera.projectionMatrix);
+  const {w, h} = viewSize();
+  return {x: (p.x / p.w * .5 + .5) * w, y: (-p.y / p.w * .5 + .5) * h, w: p.w, z: p.z / p.w, valid: p.w > 0 && p.z / p.w > -1 && p.z / p.w < 1};
+}
+function knifePointVisible(point) {
+  const screen = knifeScreen(point);
+  if (!screen.valid) return false;
+  const world = new THREE.Vector3(...point).applyMatrix4(KNIFE.object.node.matrixWorld);
+  const ray = screenRay(screen.x, screen.y);
+  const hit = ray.intersectObjects(S.objects.filter(o => o.visible).map(o => o.meshNode).filter(Boolean), false)[0];
+  return !hit || ray.ray.origin.distanceTo(world) <= hit.distance + Math.max(1e-5, hit.distance * 1e-6);
+}
+function knifePick(x, y, radius = 18) {
+  if (!knifeActive()) return null;
+  scene.updateMatrixWorld(true);
+  const m = KNIFE.mesh, projected = m.verts.map(knifeScreen), topology = topo(m), vertices = [], edges = [];
+  projected.forEach((p, v) => {
+    const distance = Math.hypot(p.x - x, p.y - y);
+    if (p.valid && topology.vertFaces[v].length && distance <= radius) vertices.push({point: m.verts[v].slice(), screen: p, kind: 'Vertex', distance});
+  });
+  topology.edges.forEach(([a, b], i) => {
+    const p = projected[a], q = projected[b];
+    if (!topology.edgeFaces[i].length || !p.valid || !q.valid) return;
+    const closest = distToSeg(x, y, p.x, p.y, q.x, q.y);
+    if (closest.d > radius || Math.hypot(q.x - p.x, q.y - p.y) < 1e-5) return;
+    const u = perspectiveEdgeParameter(closest.t, p.w, q.w), point = vlerp(m.verts[a], m.verts[b], u);
+    edges.push({point, screen: knifeScreen(point), kind: 'Edge', distance: closest.d});
+  });
+  // Vertex magnets take priority over nearby edges, independent of selection mode.
+  for (const list of [vertices, edges]) {
+    list.sort((a, b) => a.distance - b.distance || a.screen.z - b.screen.z);
+    for (const pick of list) if (knifePointVisible(pick.point)) return pick;
+  }
+  return null;
+}
+function knifeTap(x, y, radius) {
+  const pick = knifePick(x, y, radius);
+  if (!pick) { toast('Knife · tap a visible vertex or edge'); return; }
+  KNIFE.hover = pick;
+  if (!KNIFE.first) { KNIFE.first = pick; requestRender(); return; }
+  const from = knifeScreen(KNIFE.first.point), to = knifeScreen(pick.point);
+  if (!from.valid || !to.valid) { toast('Bring both cut points into view'); return; }
+  const result = knifeCutProjected(KNIFE.mesh, KNIFE.mesh.verts.map(knifeScreen), from, to,
+    (_fi, a, b) => [.2, .5, .8].every(t => knifePointVisible(vlerp(a, b, t))));
+  if (!result) { toast('No face crossed · choose another edge or vertex'); requestRender(); return; }
+  KNIFE.steps.push({mesh: KNIFE.mesh, first: KNIFE.first, edges: new Set(KNIFE.edges)});
+  if (KNIFE.steps.length > UNDO.max) KNIFE.steps.shift();
+  KNIFE.mesh = result.mesh;
+  for (const [key, children] of result.replacements) if (KNIFE.edges.delete(key)) for (const child of children) KNIFE.edges.add(child);
+  for (const key of result.edges) KNIFE.edges.add(key);
+  KNIFE.first = pick; buildSubbar(); requestRender();
+}
+function drawKnife() {
+  const canvas = $('#knifeCanvas'), ctx = canvas.getContext('2d'), {w, h} = viewSize(), dpr = Math.min(devicePixelRatio || 1, 2);
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, w, h);
+  if (!knifeActive()) return;
+  const line = (a, b, preview) => {
+    const p = knifeScreen(a), q = knifeScreen(b); if (!p.valid || !q.valid) return;
+    ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
+    ctx.setLineDash(preview ? [5, 4] : []); ctx.lineWidth = 4; ctx.strokeStyle = '#14171c'; ctx.stroke();
+    ctx.lineWidth = 2; ctx.strokeStyle = preview ? '#ffe3a2' : '#ffad48'; ctx.stroke(); ctx.setLineDash([]);
+  };
+  for (const key of KNIFE.edges) { const [a, b] = ekeySplit(key); line(KNIFE.mesh.verts[a], KNIFE.mesh.verts[b], false); }
+  if (KNIFE.first && KNIFE.hover) line(KNIFE.first.point, KNIFE.hover.point, true);
+  for (const pick of [KNIFE.first, KNIFE.hover]) if (pick) {
+    const p = knifeScreen(pick.point); if (!p.valid) continue;
+    const vertex = pick.kind === 'Vertex';
+    ctx.beginPath(); ctx.arc(p.x, p.y, vertex ? 7 : 5, 0, Math.PI * 2);
+    ctx.fillStyle = '#151a22'; ctx.fill(); ctx.strokeStyle = vertex ? '#84f0b0' : '#ffd180'; ctx.lineWidth = 2; ctx.stroke();
+    if (vertex) { ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fillStyle = '#84f0b0'; ctx.fill(); }
+  }
+}
+
 // ==== app_brres.js ====
 // Standalone archive editor: opening a BRRES does not replace the modeling scene.
 const BRED = { archive: null, name: '', selected: null, changes: new Map(), palettes: new Map(), preview: null, replacement: null, imageTarget: null, error: '' };
@@ -9998,6 +10237,7 @@ function openTrackEditor() {
 }
 function setWorkspace(workspace) {
   if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
   closeSheet();
@@ -11304,8 +11544,8 @@ function segButtons(value, options, onChange) {
 $('#btnMenu').innerHTML = icon('menu');
 $('#btnUndo').innerHTML = icon('undo');
 $('#btnRedo').innerHTML = icon('redo');
-$('#btnUndo').addEventListener('click', () => { if (TF.active) tfCancel(); else if (PM.active) pmCancel(); else undo(); });
-$('#btnRedo').addEventListener('click', () => redo());
+$('#btnUndo').addEventListener('click', () => { if (knifeActive()) knifeUndo(); else if (TF.active) tfCancel(); else if (PM.active) pmCancel(); else undo(); });
+$('#btnRedo').addEventListener('click', () => { if (!knifeActive()) redo(); });
 $('#btnMode').addEventListener('click', () => {
   menuSheet('Mode', [
     { label: 'Object Mode', icon: 'cube', desc: 'Select, arrange and transform whole objects', key: 'Tab', run: () => S.mode !== 'object' && setMode('object') },
@@ -11319,6 +11559,7 @@ for (const b of document.querySelectorAll('#selModes button')) {
 const VIEW_CYCLE = ['3d', 'split', 'uv'];
 function isUVFocused() { return S.workspace === 'model' && (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')); }
 function finishEditorInteraction() {
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
   if (UVD) uvDragEnd();
@@ -11382,6 +11623,14 @@ function buildSubbar() {
       chip('', 'Fit view', uvFit));
     return;
   }
+  if (S.tool === 'knife') {
+    bar.append(chip('Knife', 'Vertex snap', () => toast('Vertices snap automatically · green ring marks a snapped vertex'), {icon: 'magnet', on: true, aria: 'Knife vertex snapping always on'}),
+      chip('', 'Apply', knifeApply, {on: KNIFE.edges.size > 0, aria: 'Apply knife cuts'}),
+      chip('', 'Cancel', knifeCancel, {aria: 'Cancel knife cuts'}),
+      chip('', 'New cut', () => { KNIFE.first = null; KNIFE.hover = null; requestRender(); }),
+      chip('', 'Undo cut', knifeUndo));
+    return;
+  }
   if (trackSubbar(bar)) return;
   if (S.tool === 'ruler') {
     bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
@@ -11430,11 +11679,11 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  const modelTools = S.mode === 'edit' ? [...TOOLS3D.slice(0,4), ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : TOOLS3D;
+  const modelTools = S.mode === 'edit' ? [...TOOLS3D.slice(0,4), ['knife', 'knife', 'Knife tool · K'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : TOOLS3D;
   for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { setEditorFocus('3d'); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   if (S.workspace === 'model') col.append(h('hr'), h('button', {
@@ -12245,6 +12494,7 @@ hideRedoPanel = () => { $('#redo').hidden = true; };
 
 // ---------- hooks ----------
 onSelectionChanged = () => {
+  if (S.tool === 'knife' && !knifeActive()) knifeCancel();
   trackRefresh();
   for (const o of S.objects) refreshOverlays(o);
   refreshOriginDots();
@@ -12254,6 +12504,7 @@ onSelectionChanged = () => {
   refreshSheet();
 };
 onModeChanged = () => {
+  if (S.tool === 'knife' && !knifeActive()) knifeCancel();
   if (S.tool === 'extrude' && (S.mode !== 'edit' || S.workspace !== 'model')) { S.tool = 'select'; hint(null); }
   if (S.creaseEdit && (S.mode !== 'edit' || S.active?.id !== S.creaseEdit || S.workspace !== 'model')) { S.creaseEdit = null; S.multiSelect = false; S.selOp = 'set'; hint(null); }
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
@@ -12262,6 +12513,9 @@ onModeChanged = () => {
   refreshSheet();
 };
 onHistoryChanged = () => {
+  // A separate edit (for example assigning a material in its panel) invalidates
+  // the private knife preview so Apply cannot overwrite that newer edit.
+  if (KNIFE.mesh) knifeCancel();
   $('#btnUndo').disabled = UNDO.idx <= 0;
   $('#btnRedo').disabled = UNDO.idx >= UNDO.stack.length - 1;
   if (LAST.op && LAST.op.idx !== UNDO.idx) { LAST.op = null; hideRedoPanel(); }
@@ -12310,7 +12564,7 @@ c3d.addEventListener('pointerdown', (e) => {
   G.maxPointers = Math.max(G.maxPointers, G.p.size);
   if (G.p.size === 1) {
     G.t0 = performance.now(); G.moved = false; G.maxPointers = 1;
-    if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && !TF.active && !PM.active) G.mode = 'extrudeTap';
+    if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
     else if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
@@ -12323,6 +12577,7 @@ c3d.addEventListener('pointerdown', (e) => {
 c3d.addEventListener('pointermove', (e) => {
   const p = rel(e);
   if (!G.p.has(e.pointerId)) {
+    if (knifeActive() && G.p.size === 0) { KNIFE.hover = knifePick(p.x, p.y, 18); requestRender(); }
     if (S.tool === 'ruler' && G.p.size === 0 && !TF.active && !PM.active) { RULER.hover = rulerPick(p.x,p.y,18); requestRender(); }
     // desktop: modal transforms follow the hovering mouse like Blender
     if (e.pointerType === 'mouse' && TF.active && G.p.size === 0) {
@@ -12336,7 +12591,7 @@ c3d.addEventListener('pointermove', (e) => {
   const dx = p.x - pt.x, dy = p.y - pt.y;
   pt.x = p.x; pt.y = p.y;
   if (Math.hypot(p.x - pt.x0, p.y - pt.y0) > (e.pointerType === 'mouse' ? 4 : 9)) G.moved = true;
-  if (G.moved) { cancelHold(); if (S.tool === 'ruler') RULER.hover = null; }
+  if (G.moved) { cancelHold(); if (S.tool === 'ruler') RULER.hover = null; if (knifeActive()) KNIFE.hover = null; }
   if (G.mode === 'two' && G.p.size === 2) {
     const t = twoInfo();
     let dth = Math.atan2(Math.sin(t.ang - G.two.ang), Math.cos(t.ang - G.two.ang));
@@ -12384,8 +12639,8 @@ function endPointer(e) {
   if (G.p.size > 0) { if (G.mode === 'two' && G.p.size === 1) G.mode = 'none'; return; }
   const quick = performance.now() - G.t0 < 320;
   if (e.type === 'pointerup') {
-    if (G.maxPointers === 2 && !G.moved && quick && G.mode !== 'box') { if (TF.active) tfCancel(); else if (PM.active) pmCancel(); else undo(); }
-    else if (G.maxPointers >= 3 && !G.moved && quick) redo();
+    if (G.maxPointers === 2 && !G.moved && quick && G.mode !== 'box') { if (knifeActive()) knifeUndo(); else if (TF.active) tfCancel(); else if (PM.active) pmCancel(); else undo(); }
+    else if (G.maxPointers >= 3 && !G.moved && quick && !knifeActive()) redo();
     else if (G.mode === 'extrudeTap' && !G.moved) tapExtrudeAt(pt.x, pt.y);
     else if (G.mode === 'pending' && !G.moved) handleTap(pt.x, pt.y, pt.type);
     else if (G.mode === 'tfclick' && !G.moved) tfConfirm();
@@ -12409,6 +12664,7 @@ function handleTap(x, y, ptype) {
   if (S.workspace !== 'model') { trackTap(x,y); return; }
   if (S.tool === 'extrude' && S.extrudeTap) { tapExtrudeAt(x,y); return; }
   const radius = ptype === 'mouse' ? 14 : 28;
+  if (S.tool === 'knife') { knifeTap(x, y, ptype === 'mouse' ? 18 : 28); return; }
   if (S.pendingTap === 'loopcut') { loopCutAt(x, y); return; }
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
   if (S.tool === 'ruler') { rulerTap(x,y,radius); return; }
@@ -12572,6 +12828,13 @@ document.addEventListener('keydown', (e) => {
   }
   if (PM.active) { if (k === 'Escape') pmCancel(); if (k === 'Enter') pmConfirm(); return; }
   if (!$('#sheet').hidden && k === 'Escape') { closeSheet(); return; }
+  if (knifeActive()) {
+    if (k === 'Escape') { e.preventDefault(); knifeCancel(); return; }
+    if (k === 'Enter') { e.preventDefault(); knifeApply(); return; }
+    if (k === 'Backspace' || (ctrl && k.toLowerCase() === 'z' && !e.shiftKey)) { e.preventDefault(); knifeUndo(); return; }
+    if (k === 'Tab') { e.preventDefault(); knifeCancel(); setMode('object'); return; }
+    if (!e.code?.startsWith('Numpad') && k !== 'Home') return;
+  }
   if (ctrl && (k === 'z' || k === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (ctrl && k === 'y') { e.preventDefault(); redo(); return; }
   if (isUVFocused()) {
@@ -12632,6 +12895,7 @@ document.addEventListener('keydown', (e) => {
     case 'a': opSelect('all'); break;
     case 'x': case 'delete': edit ? menuDelete() : opDelete(); break;
     case 'e': if (edit) opExtrude(); break;
+    case 'k': if (edit) knifeActivate(); break;
     case 'i': if (edit) opInset(); break;
     case 'f': if (edit) opFill('ngon'); break;
     case 'm': if (edit) menuMerge(); break;
@@ -12690,7 +12954,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

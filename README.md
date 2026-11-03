@@ -97,3 +97,13 @@ UV. The 3D cursor uses a small, thin red-and-white ring with short crosshairs.
 **Straighten X** makes selected UVs exactly horizontal; **Straighten Y** makes
 them exactly vertical. Both keep spacing along that UV axis and leave unselected
 UVs unchanged. Plain **Straighten** follows the direction between the endpoints.
+
+In **Edit Mode**, choose **Knife** in the left sidebar (keyboard: **K**). Tap a
+vertex or edge to start, then another vertex or edge to preview a cut across the
+visible faces. Nearby vertices magnetize automatically and show a green ring.
+Keep tapping to continue, or choose **New cut** for a separate stroke. **Apply**
+(Enter) commits the cuts as one undoable operation; **Cancel** (Escape) discards
+them. **Undo cut** (Backspace) removes the last preview segment. Drag to orbit or
+use two fingers to navigate. Materials, UV seams and creases survive the cuts.
+This first version uses boundary endpoints and cuts visible surfaces; it does
+not start/end inside a face or cut through hidden surfaces.

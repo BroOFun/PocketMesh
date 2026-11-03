@@ -11,6 +11,7 @@ function setLastOp(label, params, schema, fn) {
 }
 // run an operator: fn(params) mutates state, returns false on failure
 function runOp(label, fn, params = {}, schema = null) {
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
   let ok;
@@ -75,6 +76,7 @@ function addPrimitive(type) {
 // ---------- extrude / duplicate ----------
 function activateExtrude() {
   if (!needEdit()) return;
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
   closeSheet();
@@ -208,6 +210,7 @@ function pickEdgeAny(x, y) {
 }
 function opLoopCutStart() {
   if (!needEdit()) return;
+  if (S.tool === 'knife') knifeCancel();
   S.pendingTap = 'loopcut';
   hint('Tap an edge to place a loop cut');
 }
@@ -628,6 +631,7 @@ function opHide(kind) {
 
 // ---------- mode switching ----------
 function setMode(mode) {
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
   if (mode === 'edit') {
