@@ -54,6 +54,39 @@ const { chromium, devices } = require('playwright');
       await page.locator('#btnView').click();
       assert.equal(await page.evaluate(() => __pm.S.view), 'uv');
       assert.ok(await page.locator('#pane3d').isHidden());
+      // Axis straightening must remove all tilt without shifting the along-axis
+      // coordinates or touching unselected UVs, even when endpoints nearly align.
+      const originalUVs = await page.evaluate(() => __pm.S.active.mesh.faces[0].uv.map(u => u.slice()));
+      const rows = [
+        [[.1,.2],[.4,.48],[.8,.66],[.95,.95]],
+        [[.1,.2],[.5,.2000001],[.9,.20000002],[.8,.8]],
+        [[.2,.1],[.2000001,.5],[.20000002,.9],[.8,.8]],
+        [[.1234561,.22],[.1234562,.2200001],[.8,.9],[.75,.12]],
+      ];
+      for (const axis of ['X','Y']) for (const row of rows) {
+        await page.evaluate(uv => {
+          const p = __pm;
+          p.S.active.mesh.faces[0].uv = uv.map(u => u.slice());
+          p.S.uvSel = new Set([0,1,2]); p.rebuildObject(p.S.active); p.pushUndo('UV line fixture');
+        }, row);
+        await page.locator('#shelf').getByRole('button', {name: 'Straighten', exact: true}).click();
+        await page.locator('#sheet').getByRole('button', {name: new RegExp('^Straighten ' + axis + '(?:$| )')}).click();
+        const result = await page.evaluate(() => __pm.S.active.mesh.faces[0].uv);
+        const fixed = axis === 'X' ? 1 : 0, along = 1 - fixed;
+        assert.equal(result[0][fixed], result[1][fixed], `Straighten ${axis} must be exactly axis-aligned`);
+        assert.equal(result[0][fixed], result[2][fixed]);
+        for (let i = 0; i < 3; i++) assert.equal(result[i][along], row[i][along], 'Keep along-axis spacing');
+        assert.deepEqual(result[3], row[3], 'Leave unselected UV unchanged');
+        assert.ok(result.flat().every(Number.isFinite));
+        await page.locator('#btnUndo').click();
+        assert.deepEqual(await page.evaluate(() => __pm.S.active.mesh.faces[0].uv), row);
+        await page.locator('#btnRedo').click();
+        assert.deepEqual(await page.evaluate(() => __pm.S.active.mesh.faces[0].uv), result);
+      }
+      await page.evaluate(uv => {
+        const p = __pm; p.S.active.mesh.faces[0].uv = uv;
+        p.rebuildObject(p.S.active); p.pushUndo('Restore UV square');
+      }, originalUVs);
       await page.locator('#sub').getByRole('button', {name: 'Select all', exact: true}).click();
       assert.equal(await page.evaluate(() => __pm.S.uvSel.size), 4);
       // UV shortcuts choose UV tools and cannot start hidden mesh operations.
@@ -122,7 +155,7 @@ const { chromium, devices } = require('playwright');
       assert.ok(await page.locator('#tfbar').isHidden());
       await checkFocus('uv');
       assert.deepEqual(errors,[]);
-      console.log(`${layout}: repeated pane/toolbar switching, UV shortcuts, transforms/undo, rotated touch view, visible operator settings and return to 3D passed`);
+      console.log(`${layout}: exact X/Y straightening, spacing/unselected UV preservation, undo/redo, pane controls, rotated touch view and return to 3D passed`);
       await ctx.close();
     }
   } finally { await browser.close(); server.close(); }

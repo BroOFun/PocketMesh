@@ -282,9 +282,9 @@ function opStraighten(kind) {
   }
   if (kind === 'rotation') { uvOp('Align Rotation', () => alignRotation(m, uvSelFaces())); return; }
   const corners = uvSelCorners();
-  // unique locations
+  // Deduplicate exact locations without rounding distinct UVs together.
   const groups = new Map();
-  for (const k of corners) { const u = uvOf(k); const key = u[0].toFixed(6) + ',' + u[1].toFixed(6); if (!groups.has(key)) groups.set(key, { u: u.slice(), ks: [] }); groups.get(key).ks.push(k); }
+  for (const k of corners) { const u = uvOf(k); const key = u[0] + ',' + u[1]; if (!groups.has(key)) groups.set(key, { u: u.slice(), ks: [] }); groups.get(key).ks.push(k); }
   const pts = [...groups.values()];
   if (pts.length < 2) { toast('Select two or more UV points', true); return; }
   const labels = { line: 'Straighten', line_x: 'Straighten X', line_y: 'Straighten Y', align_x: 'Align X', align_y: 'Align Y', align_auto: 'Align Auto' };
@@ -292,7 +292,7 @@ function opStraighten(kind) {
     let mu = 0, mv = 0; for (const p of pts) { mu += p.u[0]; mv += p.u[1]; } mu /= pts.length; mv /= pts.length;
     let su = 0, sv = 0; for (const p of pts) { su += Math.abs(p.u[0] - mu); sv += Math.abs(p.u[1] - mv); }
     let A = null, B = null;
-    if (kind.startsWith('line')) {
+    if (kind === 'line') {
       // endpoints: farthest pair along principal direction
       let cxx = 0, cxy = 0, cyy = 0;
       for (const p of pts) { const dx = p.u[0] - mu, dy = p.u[1] - mv; cxx += dx * dx; cxy += dx * dy; cyy += dy * dy; }
@@ -302,14 +302,13 @@ function opStraighten(kind) {
     }
     for (const p of pts) {
       let n = p.u.slice();
-      if (kind === 'align_x' || (kind === 'align_auto' && su <= sv)) n[0] = mu;
-      else if (kind === 'align_y' || kind === 'align_auto') n[1] = mv;
+      if (kind === 'line_y' || kind === 'align_x' || (kind === 'align_auto' && su <= sv)) n[0] = mu;
+      else if (kind === 'line_x' || kind === 'align_y' || kind === 'align_auto') n[1] = mv;
       else {
         const ex = B[0] - A[0], ey = B[1] - A[1], l2 = ex * ex + ey * ey;
         if (l2 < 1e-16) continue;
-        if (kind === 'line') { const t = ((p.u[0] - A[0]) * ex + (p.u[1] - A[1]) * ey) / l2; n = [A[0] + ex * t, A[1] + ey * t]; }
-        else if (kind === 'line_x') { if (Math.abs(ey) > 1e-12) n[0] = A[0] + ex * ((p.u[1] - A[1]) / ey); else n[1] = A[1]; }
-        else if (kind === 'line_y') { if (Math.abs(ex) > 1e-12) n[1] = A[1] + ey * ((p.u[0] - A[0]) / ex); else n[0] = A[0]; }
+        const t = ((p.u[0] - A[0]) * ex + (p.u[1] - A[1]) * ey) / l2;
+        n = [A[0] + ex * t, A[1] + ey * t];
       }
       for (const k of p.ks) { const f = m.faces[ckF(k)]; f.uv[ckC(k)] = [n[0], n[1]]; }
     }

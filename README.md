@@ -94,3 +94,6 @@ In split view, tapping a pane or its toolbar switches the shelf and controls to
 that editor. UV tools have their own multiselect, G/R/S drag-tool shortcuts,
 Home to fit, and visible operation settings. **3D View** returns from full-screen
 UV. The 3D cursor uses a small, thin red-and-white ring with short crosshairs.
+**Straighten X** makes selected UVs exactly horizontal; **Straighten Y** makes
+them exactly vertical. Both keep spacing along that UV axis and leave unselected
+UVs unchanged. Plain **Straighten** follows the direction between the endpoints.
