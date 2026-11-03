@@ -113,7 +113,7 @@ const S = {
   shading: 'solid', xray: false, faceOrient: true, view: '3d',
   workspace: 'model', track: normalizeTrack(),
   cursor: new THREE.Vector3(), ruler: normalizeRuler(),
-  uvSel: new Set(), uvTool: 'select', uvStretch: false,
+  uvSel: new Set(), uvTool: 'select', uvSelOp: 'set', uvStretch: false,
 };
 let _nid = 1, _matNid = 1, _imgNid = 1;
 let dirty = true;
@@ -191,19 +191,26 @@ function pointMaterial(size, { cursor = false, onTop = false } = {}) {
       void main(){ vC = vcol; vec4 mv = modelViewMatrix * vec4(position, 1.0); gl_Position = projectionMatrix * mv;
         gl_Position.z -= 0.0012 * gl_Position.w; gl_PointSize = size; }`,
     fragmentShader: cursor
-      ? `varying vec3 vC; void main(){ vec2 c = gl_PointCoord - 0.5; float r = length(c);
-          float ring = smoothstep(0.30, 0.33, r) * (1.0 - smoothstep(0.40, 0.43, r));
-          float cross = (abs(c.x) < 0.035 || abs(c.y) < 0.035) && r > 0.18 && r < 0.5 ? 1.0 : 0.0;
-          if (ring < 0.05 && cross < 0.5) discard;
-          float a = atan(c.y, c.x); float dash = step(0.0, sin(a * 4.0));
-          vec3 col = ring > 0.05 ? mix(vec3(1.0), vec3(0.95, 0.2, 0.25), dash) : vec3(0.08);
-          gl_FragColor = vec4(col, 1.0); }`
+      ? `uniform float size; void main(){
+          // CSS-pixel dimensions keep the marker fine and consistent on retina screens.
+          vec2 p = (gl_PointCoord - 0.5) * 28.0;
+          float r = length(p), aa = 28.0 / size;
+          float d = abs(r - 8.0);
+          float ring = 1.0 - smoothstep(0.45, 0.45 + aa, d);
+          float outline = 1.0 - smoothstep(1.0, 1.0 + aa, d);
+          float cross = (1.0 - smoothstep(0.35, 0.35 + aa, min(abs(p.x), abs(p.y))))
+            * smoothstep(4.5, 5.5, r) * (1.0 - smoothstep(12.0, 13.0, r));
+          float alpha = max(outline * 0.7, cross * 0.9);
+          if (alpha < 0.01) discard;
+          float dash = step(0.0, sin(atan(p.y, p.x) * 4.0));
+          vec3 col = mix(vec3(0.06), mix(vec3(0.9), vec3(0.85, 0.18, 0.21), dash), ring);
+          gl_FragColor = vec4(col, max(alpha, ring * 0.9)); }`
       : `varying vec3 vC; void main(){ vec2 c = gl_PointCoord - 0.5; if (dot(c, c) > 0.25) discard; gl_FragColor = vec4(vC, 1.0); }`,
-    depthTest: !onTop, depthWrite: false, transparent: false,
+    depthTest: !onTop, depthWrite: false, transparent: cursor,
   });
 }
 const DPR = () => renderer.getPixelRatio();
-const cursorPts = new THREE.Points(new THREE.BufferGeometry(), pointMaterial(38 * Math.min(window.devicePixelRatio || 1, 2), { cursor: true, onTop: true }));
+const cursorPts = new THREE.Points(new THREE.BufferGeometry(), pointMaterial(28 * Math.min(window.devicePixelRatio || 1, 2), { cursor: true, onTop: true }));
 cursorPts.geometry.setAttribute('position', new THREE.Float32BufferAttribute([0, 0, 0], 3));
 cursorPts.geometry.setAttribute('vcol', new THREE.Float32BufferAttribute([1, 1, 1], 3));
 cursorPts.renderOrder = 10; cursorPts.frustumCulled = false;

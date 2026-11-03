@@ -124,17 +124,50 @@ for (const b of document.querySelectorAll('#selModes button')) {
   b.addEventListener('click', () => setSelectMode(b.dataset.sm));
 }
 const VIEW_CYCLE = ['3d', 'split', 'uv'];
+function isUVFocused() { return S.workspace === 'model' && (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')); }
+function finishEditorInteraction() {
+  if (TF.active) tfConfirm();
+  if (PM.active) pmConfirm();
+  if (UVD) uvDragEnd();
+}
+function updateSelectionModes() {
+  $('#selModes').hidden = S.workspace !== 'model' || S.mode !== 'edit' || isUVFocused();
+  for (const b of document.querySelectorAll('#selModes button')) b.classList.toggle('on', b.dataset.sm === S.selectMode);
+}
+function syncEditorControls() {
+  const pane = $(isUVFocused() ? '#paneUV' : '#pane3d');
+  if ($('#redo').parentElement !== pane) pane.append($('#redo'));
+  updateSelectionModes(); buildSubbar(); buildShelf(); gizmoSync();
+}
+function setEditorFocus(focus) {
+  focus = S.view === 'uv' ? 'uv' : S.view === '3d' ? '3d' : focus;
+  if (S.focus === focus) return;
+  finishEditorInteraction();
+  S.focus = focus;
+  syncEditorControls();
+}
+function activateUVTool(tool) {
+  setEditorFocus('uv');
+  if (UVD) uvDragEnd();
+  S.uvTool = tool;
+  buildTools();
+}
 function setWorkView(v) {
+  if (!VIEW_CYCLE.includes(v)) v = '3d';
+  finishEditorInteraction();
   S.view = v;
   $('#work').className = 'v-' + v + (v === 'split' ? ' split' : '');
-  S.focus = v === 'uv' ? 'uv' : '3d';
+  S.focus = v === '3d' ? '3d' : 'uv';
   $('#btnView').innerHTML = icon(v === '3d' ? 'uv' : v === 'split' ? 'split' : 'view3d');
   $('#btnView').setAttribute('aria-label', v === '3d' ? 'Show UV editor' : v === 'split' ? 'UV editor only' : '3D view only');
   _lastW = 0; UV.w = 0;
   settingsSet('view', v);
-  buildShelf(); gizmoSync(); uvRequest(); requestRender();
+  syncEditorControls(); uvRequest(); requestRender();
 }
 $('#btnView').addEventListener('click', () => setWorkView(VIEW_CYCLE[(VIEW_CYCLE.indexOf(S.view) + 1) % 3]));
+// Capture pane focus before canvas, gizmo, or toolbar handlers run.
+$('#pane3d').addEventListener('pointerdown', () => setEditorFocus('3d'), true);
+$('#paneUV').addEventListener('pointerdown', () => setEditorFocus('uv'), true);
 
 // ---------- sub bar (orientation, pivot, snap, proportional, select op) ----------
 const ORIENT = [['global', 'Global'], ['local', 'Local'], ['normal', 'Normal'], ['view', 'View']];
@@ -142,12 +175,21 @@ const PIVOT = [['median', 'Median Point'], ['bounds', 'Bounding Box'], ['individ
 function buildSubbar() {
   const bar = $('#sub');
   bar.innerHTML = '';
-  if (trackSubbar(bar)) return;
   const chip = (lbl, val, run, opts = {}) => {
     const b = h('button', { class: 'chip' + (opts.on ? ' on' : ''), 'aria-label': opts.aria || lbl }, opts.icon ? h('span', { html: icon(opts.icon), style: { display: 'grid' } }) : null, lbl ? h('span', { class: 'lbl' }, lbl) : null, val ? h('span', {}, val) : null);
     b.addEventListener('click', run);
     return b;
   };
+  if (isUVFocused()) {
+    bar.append(h('span', {class: 'muted', style: {whiteSpace: 'nowrap'}}, 'UV Editor'),
+      chip('Multiselect', S.uvSelOp === 'add' ? 'Done' : '', () => { S.uvSelOp = S.uvSelOp === 'add' ? 'set' : 'add'; buildSubbar(); }, {on: S.uvSelOp === 'add', aria: 'UV multiselect'}),
+      chip('', 'Select all', () => uvSelectAll('all')),
+      chip('', 'Deselect', () => uvSelectAll('none')),
+      chip('', 'Snap', () => { S.snap = !S.snap; settingsSet('snap', S.snap); buildSubbar(); }, {on: S.snap, icon: 'magnet', aria: 'Snap UV transforms'}),
+      chip('', 'Fit view', uvFit));
+    return;
+  }
+  if (trackSubbar(bar)) return;
   if (S.tool === 'ruler') {
     bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
     return;
@@ -199,14 +241,14 @@ function buildTools() {
   for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { setEditorFocus('3d'); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
   for (const t of [['select', 'select', 'Tap select · drag to pan'], ['box', 'box', 'Box select'], null, ['move', 'move', 'Drag to move UVs'], ['rotate', 'rotate', 'Drag to rotate UVs'], ['scale', 'scale', 'Drag to scale UVs'], null, ['fit', 'frame', 'Fit view']]) {
     if (!t) { uc.append(h('hr')); continue; }
     const b = h('button', { class: S.uvTool === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { if (t[0] === 'fit') { uvFit(); return; } S.uvTool = t[0]; buildTools(); });
+    b.addEventListener('click', () => { setEditorFocus('uv'); if (t[0] === 'fit') { uvFit(); return; } activateUVTool(t[0]); });
     uc.append(b);
   }
 }
@@ -334,7 +376,7 @@ function buildShelf() {
   const sh = $('#shelf'); sh.innerHTML = '';
   if (buildTrackShelf(sh)) return;
   const g = () => h('span', { class: 'grp' });
-  if (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')) {
+  if (isUVFocused()) {
     sh.append(
       shelfBtn('Unwrap', 'uv', menuUnwrap, true), shelfBtn('Straighten', 'straighten', menuStraighten, true), shelfBtn('Pack', 'pack', opPack), shelfBtn('Avg Scale', 'scale', opAvgScale), g(),
       shelfBtn('Rotate', 'rot90', () => menuSheet('Rotate UVs', [{ label: 'Rotate 90° Counter-Clockwise', icon: 'rot90', run: () => opUVRot90(1) }, { label: 'Rotate 90° Clockwise', icon: 'rotate', run: () => opUVRot90(-1) }, { label: 'Rotate 180°', icon: 'rotate', run: () => opUVRot90(2) }, { group: 'Free rotation: use the Rotate tool on the left. It clicks to 0 / 90 / 180 / 270°.' }]), true),
@@ -342,7 +384,7 @@ function buildShelf() {
       shelfBtn('Fit 0–1', 'frame', opUVFit), shelfBtn('Weld', 'merge', opUVWeld), g(),
       shelfBtn('Select', 'selall', menuUVSelect, true), shelfBtn(S.uvStretch ? 'Stretch On' : 'Stretch', 'stretch', () => { S.uvStretch = !S.uvStretch; uvRequest(); buildShelf(); }),
       shelfBtn('Texture', 'material', openMaterialPanel), shelfBtn('Layout PNG', 'image', exportUVLayout), g(),
-      shelfBtn('3D Shelf', 'view3d', () => { S.focus = '3d'; buildShelf(); }),
+      shelfBtn(S.view === 'uv' ? '3D View' : '3D Shelf', 'view3d', () => S.view === 'uv' ? setWorkView('3d') : setEditorFocus('3d')),
     );
     return;
   }
@@ -367,7 +409,7 @@ function buildShelf() {
       shelfBtn('Ruler', 'ruler', openRuler), shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
     );
   }
-  if (S.view === 'split') sh.append(g(), shelfBtn('UV Shelf', 'uv', () => { S.focus = 'uv'; buildShelf(); }));
+  if (S.view === 'split') sh.append(g(), shelfBtn('UV Shelf', 'uv', () => setEditorFocus('uv')));
 }
 
 // ---------- menus ----------
@@ -972,8 +1014,7 @@ function openHelp() {
       tip('Two fingers', 'drag to pan, pinch to zoom, twist to turn the view. Two-finger tap undoes, three-finger tap redoes.'),
       tip('Map style', 'in Settings makes one finger pan like a maps app.'),
       tip('Axis ball (top right)', 'tap an axis for front, side or top view; tap again for the opposite side.'),
-      tip('Move / Rotate / Scale', 'buttons on the bottom shelf start a Blender-style transform: drag anywhere, lock X / Y / Z, type an exact number, then Done.'),
-      tip('Gizmo tools', 'on the left show handles you drag directly.'),
+      tip('Move / Rotate / Scale', 'tools on the left show handles you drag directly. In 3D, keyboard G / R / S starts a transform: drag, lock X / Y / Z, type a number, then Done.'),
       tip('Edit Mode', 'models the active object. Pick vertex, edge or face selection at the top.'),
       tip('Double-tap an edge', 'selects its whole edge loop.'),
       tip('Set / Add / Sub', 'controls whether taps and box selections replace, add to or remove from the selection.'),
@@ -981,7 +1022,7 @@ function openHelp() {
       tip('Multiselect', 'Hold a vertex, edge, face or object for a moment, then tap to add or remove more. Tap Done in the top bar to finish.'),
       tip('Modifiers', 'The wrench opens Subdivision Surface. Edit the control mesh in Edit Mode; preview and export the smooth result in Object Mode.'),
       tip('Textures', 'Material → Choose image, then UV → Unwrap. Use the UV view (top-right button) to straighten and pack.'),
-      tip('UV view', 'pinch to zoom, twist to rotate the view (clicks to 0/90/180/270°). The UV Rotate tool clicks to the same angles.'),
+      tip('UV view', 'tap either pane or its tools to switch controls. G / R / S chooses the UV drag tool; Home fits the view. Pinch to zoom and twist to rotate the view (clicks to 0/90/180/270°). 3D View returns from full-screen UV.'),
       tip('Keyboard', 'works too: Tab, G R S, X Y Z, E, I, Ctrl R, A, F, M, U, Shift A, Shift D, Ctrl Z.'),
     ));
   }, { kind: 'help' });
@@ -1018,11 +1059,8 @@ onSelectionChanged = () => {
 onModeChanged = () => {
   if (S.tool === 'extrude' && (S.mode !== 'edit' || S.workspace !== 'model')) { S.tool = 'select'; hint(null); }
   if (S.creaseEdit && (S.mode !== 'edit' || S.active?.id !== S.creaseEdit || S.workspace !== 'model')) { S.creaseEdit = null; S.multiSelect = false; S.selOp = 'set'; hint(null); }
-  buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
-  $('#selModes').hidden = S.workspace !== 'model' || S.mode !== 'edit';
-  for (const b of document.querySelectorAll('#selModes button')) b.classList.toggle('on', b.dataset.sm === S.selectMode);
-  buildShelf();
+  syncEditorControls();
   buildTools();
   refreshSheet();
 };
@@ -1066,8 +1104,7 @@ function twistView(dth) { CAM.anim = null; CAM.yaw += CAM.pitch < -0.01 ? -dth :
 c3d.addEventListener('contextmenu', (e) => e.preventDefault());
 c3d.addEventListener('pointerdown', (e) => {
   cancelHold();
-  S.focus = '3d';
-  if (S.view === 'split' && $('#shelf').dataset.focus !== '3d') { $('#shelf').dataset.focus = '3d'; buildShelf(); }
+  setEditorFocus('3d');
   if (tc.enabled && (tc.dragging || tc.axis)) return;
   if (document.activeElement && document.activeElement.blur && document.activeElement !== document.body) document.activeElement.blur();
   try { c3d.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
@@ -1253,7 +1290,7 @@ const UG = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false };
 function uvTwoInfo() { const [a, b] = [...UG.p.values()]; return { mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y), ang: Math.atan2(b.y - a.y, b.x - a.x) }; }
 cuv.addEventListener('contextmenu', (e) => e.preventDefault());
 cuv.addEventListener('pointerdown', (e) => {
-  if (S.focus !== 'uv') { S.focus = 'uv'; buildShelf(); }
+  setEditorFocus('uv');
   try { cuv.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
   const p = rel(e, cuv);
   UG.p.set(e.pointerId, { x: p.x, y: p.y, x0: p.x, y0: p.y, type: e.pointerType });
@@ -1303,14 +1340,15 @@ function uvEnd(e) {
   if (e.type === 'pointerup') {
     if (UG.maxPointers === 2 && !UG.moved && quick) undo();
     else if (UG.maxPointers >= 3 && !UG.moved && quick) redo();
-    else if (UG.mode === 'pending' && !UG.moved && S.active) uvTap(pt.x, pt.y, S.selOp);
-    else if (UG.mode === 'box' && UV.box) uvBoxSelect(UV.box, S.selOp);
+    else if (UG.mode === 'pending' && !UG.moved && S.active) uvTap(pt.x, pt.y, S.uvSelOp);
+    else if (UG.mode === 'box' && UV.box) uvBoxSelect(UV.box, S.uvSelOp);
   }
   if (UG.mode === 'drag') uvDragEnd();
   UV.box = null; UG.mode = null; UG.maxPointers = 0; uvRequest();
 }
 cuv.addEventListener('pointerup', uvEnd);
 cuv.addEventListener('pointercancel', uvEnd);
+cuv.addEventListener('lostpointercapture', uvEnd);
 cuv.addEventListener('wheel', (e) => {
   e.preventDefault();
   const p = rel(e, cuv), f = Math.exp(-e.deltaY * 0.0015);
@@ -1339,6 +1377,21 @@ document.addEventListener('keydown', (e) => {
   if (!$('#sheet').hidden && k === 'Escape') { closeSheet(); return; }
   if (ctrl && (k === 'z' || k === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (ctrl && k === 'y') { e.preventDefault(); redo(); return; }
+  if (isUVFocused()) {
+    const lk = k.toLowerCase();
+    if (k === 'Tab') { e.preventDefault(); setMode(S.mode === 'edit' ? 'object' : 'edit'); return; }
+    if (k === 'Home' || e.code === 'NumpadDecimal') { e.preventDefault(); uvFit(); return; }
+    if (k === 'Escape') { uvDragCancel(); activateUVTool('select'); return; }
+    if (ctrl && lk === 'i') { e.preventDefault(); uvSelectAll('invert'); return; }
+    if (lk === 'a') { e.preventDefault(); uvSelectAll(e.altKey ? 'none' : 'all'); return; }
+    if (!ctrl && !e.altKey) {
+      const tool = {g: 'move', r: 'rotate', s: 'scale', b: 'box'}[lk];
+      if (tool) { e.preventDefault(); activateUVTool(tool); }
+      else if (lk === 'u') menuUnwrap();
+      else if (lk === 'l') uvSelectAll('island');
+    }
+    return; // Mesh-only shortcuts must never act on the hidden 3D selection.
+  }
   if (e.code && e.code.startsWith('Numpad')) {
     const map = { Numpad1: ctrl ? 'back' : 'front', Numpad3: ctrl ? 'left' : 'right', Numpad7: ctrl ? 'bottom' : 'top' };
     if (map[e.code]) { setView(map[e.code]); CAM.viewName = map[e.code]; e.preventDefault(); return; }
@@ -1356,11 +1409,6 @@ document.addEventListener('keydown', (e) => {
   if (k === 'Tab') { e.preventDefault(); setMode(edit ? 'object' : 'edit'); return; }
   if (k === 'Home') { frameSelected(); return; }
   if (edit && ['1', '2', '3'].includes(k) && !ctrl) { setSelectMode(['vert', 'edge', 'face'][+k - 1]); return; }
-  if (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')) {
-    if (lk === 'a' && !e.altKey) { uvSelectAll('all'); return; }
-    if (lk === 'a' && e.altKey) { uvSelectAll('none'); return; }
-    if (lk === 'u') { menuUnwrap(); return; }
-  }
   if (e.shiftKey && lk === 'a') { menuAdd(); return; }
   if (e.shiftKey && lk === 'd') { opDuplicate(); return; }
   if (e.shiftKey && lk === 's') { menuSnap(); return; }
