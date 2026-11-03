@@ -4,7 +4,7 @@ export function extrudeToPoint(
   mesh,
   selection,
   target,
-  { rotate = false, rotateSource = true, direction = null, viewAxis = [0, 0, 1] } = {},
+  { rotate = false, rotateSource = true, direction = null, viewAxis = [0, 0, 1], verticesOnly = false } = {},
 ) {
   if (!Array.isArray(target) || target.length !== 3 || !target.every(Number.isFinite))
     throw new Error('Invalid extrusion target');
@@ -24,7 +24,7 @@ export function extrudeToPoint(
   if (vlen(offset) < 1e-8) return null;
   let angle = 0,
     axis = [0, 0, 1];
-  if (rotate && direction && vlen(direction) > 1e-8) {
+  if (rotate && !verticesOnly && direction && vlen(direction) > 1e-8) {
     const from = vnorm(direction),
       to = vnorm(offset);
     angle = Math.acos(Math.max(-1, Math.min(1, vdot(from, to))));
@@ -43,7 +43,7 @@ export function extrudeToPoint(
   };
   const step = rotateSource ? angle / 2 : angle;
   if (rotateSource && angle) for (const v of selected) mesh.verts[v] = turn(mesh.verts[v], step);
-  const result = extrudeRegion(mesh, { ...selection, verts: selected });
+  const result = extrudeRegion(mesh, verticesOnly ? {verts: selected, edges: new Set(), faces: new Set()} : { ...selection, verts: selected });
   for (const v of result.verts) mesh.verts[v] = vadd(turn(mesh.verts[v], step), offset);
   return result;
 }

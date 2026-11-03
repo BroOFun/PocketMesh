@@ -107,3 +107,15 @@ them. **Undo cut** (Backspace) removes the last preview segment. Drag to orbit o
 use two fingers to navigate. Materials, UV seams and creases survive the cuts.
 This first version uses boundary endpoints and cuts visible surfaces; it does
 not start/end inside a face or cut through hidden surfaces.
+
+The **Extrude** tool has **Quick drag** enabled by default: drag from a selected
+vertex, edge, or face, and release to finish. The new geometry stays selected so
+the next drag continues immediately. Drag empty space to navigate; two-finger
+navigation cancels an unfinished quick extrusion. **Multiselect** and long-press
+selection also work inside the tool. In vertex selection mode, **Vertices only**
+extends each selected point with a wire edge, even when those points share an
+existing edge or face. Otherwise, connected selections extrude as a region.
+For precise steps, use **Drag extrude** and its axis/value controls, then **Next**
+(or **E**) to commit and immediately extrude again. **Done** finishes; **Cancel**
+removes the current unconfirmed step. Tap extrusion remains optional and off by
+default; **Vertices only** works with tap extrusion too.

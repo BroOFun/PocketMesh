@@ -258,6 +258,7 @@ function tfStart(kind, opts = {}) {
     num: '', snap: S.snap,
     start: { x: pc.x + r, y: pc.y }, ptr: { x: pc.x + r, y: pc.y }, accAngle: 0, prevAngle: null,
     onConfirm: opts.onConfirm, onCancel: opts.onCancel, undoLabel: opts.undoLabel || null,
+    next: opts.next || null, quickExtrude: !!opts.quickExtrude,
     value: null,
   };
   if (opts.axis !== undefined) TF.active.axis = opts.axis;
@@ -399,13 +400,25 @@ function tfUpdate() {
 }
 function tfConfirm() {
   const t = TF.active;
-  if (!t) return;
+  if (!t) return false;
+  if (t.quickExtrude && (!t.value?.T || t.value.T.length() < 1e-8)) { tfCancel(); return false; }
   TF.active = null;
   tfGuide.visible = false;
   tfHideBar();
   pushUndo(t.undoLabel || t.label);
   if (t.onConfirm) t.onConfirm();
   onSelectionChanged();
+  return true;
+}
+function tfNextExtrude() {
+  const previous = TF.active, next = previous?.next;
+  if (next && tfConfirm()) {
+    next();
+    if (TF.active) {
+      for (const key of ['axis', 'plane', 'alt', 'snap']) TF.active[key] = previous[key];
+      tfShowBar(true); tfUpdate();
+    }
+  }
 }
 function tfCancel() {
   const t = TF.active;
@@ -437,6 +450,8 @@ function tfSetAxis(ax, plane = false) {
 }
 function tfShowBar(refreshOnly) {
   const t = TF.active, bar = $('#tfbar');
+  // Keep the viewport size fixed under the finger during quick extrusion.
+  if (t.quickExtrude) { hint('Release to finish · drag the new selection to extrude again'); return; }
   const num = t.num;
   bar.innerHTML = '';
   const axBtn = (k) => {
@@ -460,7 +475,10 @@ function tfShowBar(refreshOnly) {
   ok.addEventListener('click', tfConfirm);
   bar.append(h('div', { class: 'info', id: 'tfInfo' }, ''), h('span', { class: 'title' }, t.label));
   if (t.kind !== 'shrink') bar.append(axBtn(0), axBtn(1), axBtn(2), plane);
-  bar.append(inp, neg, snap, h('span', { class: 'grow' }), cancel, ok);
+  const next = t.next ? h('button', {class: 'ok', 'aria-label': 'Next extrusion', title: 'Confirm this step and extrude again · E', onclick: tfNextExtrude}, 'Next') : null;
+  bar.append(inp, neg, snap, h('span', { class: 'grow' }), cancel);
+  if (next) bar.append(next);
+  bar.append(ok);
   bar.hidden = false;
   $('#shelf').hidden = true;
   if (!refreshOnly) hint(t.customAxis && t.kind === 'move'

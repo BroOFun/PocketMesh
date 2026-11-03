@@ -63,6 +63,19 @@ r = a.extrudeToPoint(
 );
 near(center(m, r.verts), [0, 0, 4]);
 assert.equal(m.faces.length, 10);
+// Vertices-only extrusion ignores the edges/faces inferred by vertex selection.
+// Every selected vertex gets its own wire, including adjacent mesh vertices.
+m = a.primPlane(); m.faces[0].mat = 4; m.seams.add('0_1'); m.creases.add('1_2');
+const originalFace = JSON.parse(JSON.stringify(m.faces[0]));
+sel = {verts: new Set([0,1,2,3]), edges: new Set(a.topo(m).edges.map(e => a.ekey(...e))), faces: new Set([0])};
+r = a.extrudeToPoint(m, sel, [0,0,2], {verticesOnly: true, rotate: true, direction: [1,0,0]});
+assert.equal(m.verts.length, 8); assert.equal(m.looseEdges.length, 4);
+assert.deepEqual(m.faces, [originalFace]);
+for (let i = 0; i < 4; i++) { near(m.verts[i+4], [m.verts[i][0],m.verts[i][1],2]); assert.deepEqual(m.looseEdges[i], [i,i+4]); }
+assert.deepEqual([...m.seams], ['0_1']); assert.deepEqual([...m.creases], ['1_2']);
+r = a.extrudeToPoint(m, {verts:r.verts,edges:new Set(),faces:new Set()}, [0,0,4], {verticesOnly:true});
+assert.equal(m.looseEdges.length, 8); assert.equal(r.verts.size, 4); assert.deepEqual(m.faces, [originalFace]);
+near(center(m,r.verts), [0,0,4]);
 // 100x defaults and migration are stable through subsequent save/undo snapshots.
 assert.equal(a.normalizeTrack().scale, 100);
 assert.equal(a.normalizeTrack({ scale: 1 }).scale, 100);
