@@ -243,9 +243,15 @@ function buildExportScene(selectedOnly, brresTextureSize = null) {
     if (!m) return null;
     let texture = null;
     const im = m.texture && m.useTexture !== false ? S.images.get(m.texture) : null;
+    if (brresTextureSize && m.texture && m.useTexture !== false && !im) throw new Error(`Material "${m.name}" is missing its image. Upload the image in Material before exporting.`);
     if (im) {
       let nm = usedTexNames.get(im.id);
-      if (!nm) { nm = im.name; let i = 1; while ([...usedTexNames.values()].includes(nm)) nm = im.name.replace(/(\.[a-z]+)$/i, `_${i++}$1`); usedTexNames.set(im.id, nm); }
+      if (!nm) {
+        const name = String(im.name || 'texture.png'), parts = /^(.*)(\.[a-z0-9]+)$/i.exec(name);
+        nm = name; let i = 1;
+        while ([...usedTexNames.values()].includes(nm)) nm = (parts ? parts[1] : name) + '_' + i++ + (parts ? parts[2] : '');
+        usedTexNames.set(im.id, nm);
+      }
       texture = { name: nm, mime: im.mime, bytes: im.bytes, width: im.width, height: im.height, filter: m.filter };
       if (brresTextureSize) {
         const factor = Math.min(1, brresTextureSize / Math.max(im.width, im.height));

@@ -22,6 +22,34 @@ function brresCanvas(image) {
 function brresSize(bytes) { return bytes >= 1048576 ? (bytes/1048576).toFixed(2)+' MiB' : (bytes/1024).toFixed(1)+' KiB'; }
 function openBRRESEditor() { openSheet('BRRES Editor',buildBRRESEditor,{panel:true,kind:'brres'}); }
 function brresEditorError(error) { BRED.error = error.message || String(error); if (SHEET.kind === 'brres') refreshSheet(true); toast(BRED.error,true); }
+function brresSelectResource(value) {
+  BRED.selected = String(value).startsWith('material:') ? String(value) : Number(value);
+  BRED.preview=null; BRED.replacement=null; BRED.error=''; refreshSheet(true);
+}
+function brresMaterialButton(material) {
+  return h('button',{class:'brres-material','aria-label':`Inspect material ${material.name} in ${material.model}`,onclick:() => brresSelectResource('material:'+material.offset)},
+    h('strong',{},material.name),h('span',{class:'muted'},material.model+' · '+(material.samplers.length ? material.samplers.map((s) => s.name).join(', ') : 'No image texture')));
+}
+function buildBRRESMaterial(body, material) {
+  const card=h('div',{class:'card'},h('h3',{},'Material · '+material.name),h('span',{class:'muted'},`Model: ${material.model} · ${brresSize(material.size)}`));
+  card.append(h('span',{class:'muted'},`${material.tevStages} TEV stage${material.tevStages===1?'':'s'} · ${material.translucent?'Translucent':'Opaque draw list'}`));
+  if (material.color) {
+    const [r,g,b,a]=material.color, hex='#'+[r,g,b].map((n) => n.toString(16).padStart(2,'0')).join('');
+    card.append(h('div',{class:'row'},h('span',{'aria-hidden':'true',style:{width:'28px',height:'28px',borderRadius:'6px',background:hex,border:'1px solid var(--line)'}}),h('span',{},`Channel color ${hex} · alpha ${a}/255`)));
+  }
+  card.append(h('h3',{},'Linked textures'));
+  if (!material.samplers.length) card.append(h('p',{class:'muted'},'This material is included in the BRRES without an image texture. Its appearance comes from material/vertex colors and the shader.'));
+  for (const sampler of material.samplers) {
+    const texture=BRED.archive.textures.find((t) => t.name===sampler.name), edit=texture && BRED.changes.get(texture.offset), current=edit||texture;
+    card.append(h('strong',{},sampler.name),h('span',{class:'muted'},`Texture slot ${sampler.slot}`+(sampler.palette?' · Palette: '+sampler.palette:'')));
+    if (texture) {
+      card.append(h('span',{class:'muted'},current.width === undefined ? 'Unsupported texture version' : `${current.width} × ${current.height} px · ${WII_TEXTURE_FORMATS[current.format]||texture.formatName}`));
+      card.append(h('button',{class:'btn',onclick:() => brresSelectResource(texture.offset)},'Open texture '+sampler.name));
+    } else card.append(h('p',{class:'brres-error'},'This texture is referenced by the material but is not embedded in this archive.'));
+  }
+  card.append(h('p',{class:'muted'},'Material and shader settings are preserved. Open a linked texture above to preview, resize or replace its image.'));
+  body.append(card);
+}
 function buildBRRESEditor(body) {
   body.append(h('div',{class:'row'},h('button',{class:'btn primary',onclick:() => $('#fileBRRES').click()},'Open BRRES…'),h('button',{class:'btn',onclick:() => {
     try { const file = runExport('brres',{baseName:'course_model',scale:1,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
@@ -34,13 +62,17 @@ function buildBRRESEditor(body) {
     return;
   }
   const counts = new Map(); for (const r of a.resources) counts.set(r.type,(counts.get(r.type)||0)+1);
-  body.append(h('div',{class:'card'},h('strong',{style:{overflowWrap:'anywhere'}},BRED.name),h('span',{class:'muted'},`BRRES v${a.version} · Big endian · ${brresSize(a.bytes.length)}`),h('span',{class:'muted'},[...counts].map(([type,n]) => `${n} ${type}`).join(' · ') || 'Empty archive')));
+  body.append(h('div',{class:'card'},h('strong',{style:{overflowWrap:'anywhere'}},BRED.name),h('span',{class:'muted'},`BRRES v${a.version} · Big endian · ${brresSize(a.bytes.length)}`),h('span',{class:'muted'},[...counts].map(([type,n]) => `${n} ${type}`).join(' · ') || 'Empty archive'),h('span',{class:'muted'},`${a.materials.length} material${a.materials.length===1?'':'s'} inside models`)));
   const exportButton = h('button',{class:'btn primary',onclick:() => {
     try { const bytes = saveBRRESEdits(a,BRED.changes); shareOrDownload(safeFileName(BRED.name.replace(/\.brres$/i,''))+'_edited.brres',bytes); } catch (e) { brresEditorError(e); }
   }},'Save & Send BRRES…');
   body.append(h('div',{class:'row'},exportButton,h('span',{class:'muted','aria-live':'polite'},`${BRED.changes.size} edited texture${BRED.changes.size === 1 ? '' : 's'}`)));
   if (!a.resources.length) return;
-  body.append(field('Resource',selectInput(BRED.selected,a.resources.map((r) => [r.offset,`${r.type} · ${r.name}${BRED.changes.has(r.offset) ? ' *' : ''}`]),(value) => { BRED.selected=Number(value); BRED.preview=null; BRED.replacement=null; BRED.error=''; refreshSheet(true); },'BRRES resource')));
+  if (a.materials.length) body.append(h('div',{class:'card'},h('h3',{},`Materials (${a.materials.length})`),h('div',{class:'brres-materials'},...a.materials.map(brresMaterialButton))));
+  const entries=[...a.resources.map((r) => [r.offset,`${r.type} · ${r.name}${BRED.changes.has(r.offset) ? ' *' : ''}`]),...a.materials.map((m) => ['material:'+m.offset,`Material · ${m.model} / ${m.name}`])];
+  body.append(field('Resource',selectInput(BRED.selected,entries,brresSelectResource,'BRRES resource')));
+  const material=a.materials.find((m) => 'material:'+m.offset===BRED.selected);
+  if (material) { buildBRRESMaterial(body,material); return; }
   const t = a.resources.find((r) => r.offset === BRED.selected); if (!t) return;
   const card = h('div',{class:'card'},h('h3',{style:{overflowWrap:'anywhere'}},t.type+' · '+t.name),h('span',{class:'muted'},`${t.group} · Version ${t.version} · ${brresSize(t.size)}`));
   body.append(card);
@@ -55,6 +87,8 @@ function buildBRRESEditor(body) {
   }
   if (t.width === undefined) { card.append(h('p',{class:'muted'},'This TEX0 version is not supported for preview or editing.')); return; }
   const edit = BRED.changes.get(t.offset), current = edit || t;
+  const users=a.materials.filter((m) => m.samplers.some((s) => s.name===t.name));
+  if (users.length) card.append(h('span',{class:'muted',style:{overflowWrap:'anywhere'}},'Used by: '+users.map((m) => m.name).join(', ')));
   card.append(h('span',{},`${current.width} × ${current.height} px · ${WII_TEXTURE_FORMATS[current.format] || t.formatName} (${current.format})`),h('span',{class:'muted'},`${current.mipCount} mip level${current.mipCount === 1 ? '' : 's'} · ${brresSize(edit?.data.length || t.encodedSize || 0)} encoded pixels`));
   if (edit) card.append(h('span',{class:'muted'},`Original: ${t.width} × ${t.height} · ${t.formatName} · ${t.mipCount} levels`));
   if ([8,9,10].includes(t.format) && !edit) {

@@ -62,7 +62,9 @@ Escape again or **Done** leaves the tool.
    using scale 1 and a maximum texture dimension of 512. The modeling scene
    remains open separately.
 2. Choose a resource. The inspector lists resource types and versions, archive
-   byte order/size, model vertex/polygon counts and material names. Texture
+   byte order/size and model vertex/polygon counts. The **Materials** list shows
+   each material separately, including color-only materials, and links to its
+   image textures. A texture can be shared by several materials. Texture
    resources show dimensions, encoding name/ID, mip level count and encoded size.
 3. For textures, choose width/height or **Fit longest edge**, an output format,
    and whether to preserve the mip count, generate a full chain, or keep only the
@@ -93,12 +95,17 @@ with user metadata or unknown formats remain read-only. Files are limited to
 ## Export and send
 
 1. Use **File → Export as BRRES…**, or choose BRRES in Export Model.
-2. Choose visible objects or selected visible objects. Choose a unit scale and
+2. All visible objects are included by default, with their assigned materials
+   and textures in the same BRRES. **Selected objects only** is an explicit opt-in
+   with a separate BRRES preference; hidden objects are excluded. This avoids
+   exporting only the selected road and losing separate finish-line or boost
+   objects. Choose a unit scale and
    maximum texture size (64–1024; default 512). The default name is
    `course_model.brres`, containing an MDL0 model named `course`.
 3. Tap **Export & Send BRRES…**. Supported mobile browsers offer the system share
    sheet, including Save to Files/AirDrop. Other browsers download the file.
-   ZIP is optional.
+   ZIP is optional. If a material references a missing image, export reports the
+   material name so you can upload that image before continuing.
 4. On desktop, drag the resulting file onto [noclip.website](https://noclip.website/)
    to inspect its geometry and textures. RiiStudio/BrawlCrate can be used for
    further inspection and editing. This release has automated compatibility
@@ -158,6 +165,7 @@ npm test
 npx playwright install chromium
 npm run test:track:browser
 npm run test:editor:browser
+npm run test:materials:browser
 npm ci --prefix test
 npm run test:export --prefix test
 ```
@@ -166,6 +174,10 @@ The browser tests start their own local servers. The editor test covers desktop
 and iPhone touch emulation, vertex/edge snapping in world units, measurement
 settings/persistence/undo, texture resize/format/mipmap controls, download/reopen,
 replacement images, larger appended textures, malformed-file errors and revert.
+The material regression test exports separate Road, FinishLine and Boost objects
+while only Road is selected, reopens the downloaded file, follows each material’s
+texture link, and checks shared images, color-only materials, image-name collisions,
+explicit selected-only exports and preservation after a texture edit.
 The track browser test checks touch selection in all
 three element modes, gesture cancellation, modifier settings, undo/apply/save,
 image alpha/downscaling, imported materials, independent samplers and a real

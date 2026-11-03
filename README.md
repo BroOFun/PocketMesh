@@ -21,7 +21,7 @@ There's no App Store, Mac or developer account involved. When a new version is p
 | Transform | Move, Rotate, Scale and Shrink/Fatten. Drag anywhere, lock to X / Y / Z or a plane, tap twice for local axes, or type an exact value. Snap increments, proportional editing with six falloffs. Pivot: median, bounding box, individual origins, 3D cursor, active. Orientation: global, local, normal, view. Gizmo tools for direct handles. |
 | Modeling | Extrude (region, individual, along normals), Inset (region / individual, depth), Loop Cut and Slide (multiple cuts), Subdivide, Fill, Grid Fill, Triangle Fill, Bridge Edge Loops, Merge (center, cursor, collapse, by distance), Delete and Dissolve, Duplicate, Separate, Join, Triangulate, Tris to Quads, Recalculate / Flip normals, Smooth / Flat shading, Mirror. |
 | Measure | Ruler with two-tap endpoints, vertex/edge snapping by default, meters by default, adjustable scale and display units, undo and saved measurements. |
-| BRRES editor | Open archives, inspect resources/material names/texture formats, preview all common Wii texture encodings, replace/resize/convert textures, regenerate mipmaps and save a copy. |
+| BRRES editor | Open archives, list every model material with its texture links (including color-only materials), inspect resource/texture formats, preview all common Wii texture encodings, replace/resize/convert textures, regenerate mipmaps and save a copy. |
 | Modifiers | Wrench panel with non-destructive Catmull–Clark / Simple subdivision (levels 0–3), editable control mesh, Apply, undo and project persistence. |
 | Objects | Origin to geometry or cursor, Apply location / rotation / scale, Separate by material / loose parts, Snap menu, Hide / Reveal, numeric transform panel, scene list. |
 | UVs | Seams; Unwrap (conformal), Unwrap (minimum stretch), Smart UV Project, Lightmap Pack, Follow Active Quads, Cube / Cylinder / Sphere projection, Project From View, Reset. UV editor with **Straighten Grid**, Straighten, Straighten X/Y, Align X/Y/Auto, Align Rotation, Pack Islands, Average Island Scale, rotate (90° / 180°, and a Rotate tool that clicks to 0 / 90 / 180 / 270°), flip, weld, fit, stretch overlay, and UV layout PNG export. Pinch to zoom and twist to rotate the UV view. |
@@ -72,6 +72,7 @@ npm test
 npx playwright install chromium
 npm run test:track:browser
 npm run test:editor:browser
+npm run test:materials:browser
 ```
 
 ```bash

@@ -830,6 +830,9 @@ function buildExport(body) {
   const st = settingsGet('export', { fmt: 'fbx', applyTransforms: false, triangulate: false, yUp: true, zip: false });
   const anySel = selectedObjects().length > 0;
   if (st.selectedOnly === undefined) st.selectedOnly = anySel;
+  // BRRES gets its own explicit scope preference. Old exports automatically
+  // saved selectedOnly=true, which could silently omit the rest of a track.
+  const selectedOnly = st.fmt === 'brres' ? st.brresSelectedOnly === true : st.selectedOnly;
   const save = () => settingsSet('export', st);
   const notes = {
     brres: 'Wii model + textures (course, MDL0 v11). For RiiStudio, BrawlCrate and noclip. A playable track also needs KCL collision, KMP race data and an SZS package.',
@@ -846,12 +849,13 @@ function buildExport(body) {
   nameIn.addEventListener('change', () => settingsSet(st.fmt === 'brres' ? 'brresName' : 'exportName', nameIn.value));
   nameIn.addEventListener('keydown', (e) => e.stopPropagation());
   const opts = h('div', { class: 'card' }, h('h3', {}, 'Options'), field('File name', nameIn),
-    checkInput(`Selected objects only${anySel ? '' : ' (nothing selected)'}`, st.selectedOnly && anySel, (v) => { st.selectedOnly = v; save(); }),
+    checkInput(`Selected objects only${anySel ? '' : ' (nothing selected)'}`, selectedOnly && anySel, (v) => { if (st.fmt === 'brres') st.brresSelectedOnly = v; else st.selectedOnly = v; save(); refreshSheet(true); }),
     st.fmt === 'brres' ? null : checkInput('Apply object transforms', st.applyTransforms, (v) => { st.applyTransforms = v; save(); }),
     st.fmt === 'brres' ? null : checkInput('Triangulate faces', st.triangulate || st.fmt === 'glb' || st.fmt === 'gltf', (v) => { st.triangulate = v; save(); }),
     st.fmt === 'brres' || st.fmt === 'glb' || st.fmt === 'gltf' ? null : checkInput('Y axis up (most apps expect this)', st.yUp, (v) => { st.yUp = v; save(); }),
     checkInput('Always wrap in a .zip', st.zip, (v) => { st.zip = v; save(); }));
   if (st.fmt === 'brres') opts.append(
+    h('p', { class: 'muted', id: 'brresScope' }, `${selectedOnly && anySel ? 'Selected visible objects' : 'All visible objects'}: ${S.objects.filter((o) => o.visible && (!(selectedOnly && anySel) || o.selected)).length}. Includes their assigned materials and image textures together in one BRRES. Color-only materials are included too.`),
     field('Wii units per model unit', numInput(st.scale ?? 1, (v) => { st.scale = v; save(); }, { min: 0.001, max: 100000 })),
     field('Maximum texture size', selectInput(st.textureSize || 512, [64, 128, 256, 512, 1024].map((v) => [v, v + ' px']), (v) => { st.textureSize = +v; save(); }, 'BRRES texture size')),
     h('p', { class: 'muted' }, 'Exports evaluated modifiers, applies transforms and converts Z-up to Wii Y-up. Textures are resized to power-of-two dimensions and embedded as RGBA8. Basic unlit color/texture, cutout and alpha blend are supported; PBR lighting and metallic effects are not exported.'));
@@ -859,7 +863,7 @@ function buildExport(body) {
   go.addEventListener('click', () => {
     try {
       const base = safeFileName(nameIn.value, 'model');
-      const r = runExport(st.fmt, { selectedOnly: st.selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
+      const r = runExport(st.fmt, { selectedOnly: selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
       shareOrDownload(r.name, r.data);
       const kb = (r.data.length || r.data.byteLength || 0) / 1024;
       $('#exportInfo').textContent = `${r.name} · ${kb > 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(kb)) + ' KB'}${r.count > 1 ? ` · ${r.count} files inside` : ''}`;
