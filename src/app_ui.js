@@ -516,8 +516,8 @@ function menuStraighten() {
   menuSheet('Straighten & Align', [
     { label: 'Straighten Grid', icon: 'grid', desc: 'Turn quad islands into a perfectly straight grid', run: () => opStraighten('grid') },
     { label: 'Straighten', icon: 'straighten', desc: 'Line up selected UVs between the two ends', run: () => opStraighten('line') },
-    { label: 'Straighten X', icon: 'straighten', run: () => opStraighten('line_x') },
-    { label: 'Straighten Y', icon: 'straighten', run: () => opStraighten('line_y') },
+    { label: 'Straighten X', icon: 'straighten', desc: 'Exactly horizontal in UV space · keep U spacing', run: () => opStraighten('line_x') },
+    { label: 'Straighten Y', icon: 'straighten', desc: 'Exactly vertical in UV space · keep V spacing', run: () => opStraighten('line_y') },
     { group: 'Align' },
     { label: 'Align X', icon: 'straighten', desc: 'Same U for all selected', run: () => opStraighten('align_x') },
     { label: 'Align Y', icon: 'straighten', desc: 'Same V for all selected', run: () => opStraighten('align_y') },
