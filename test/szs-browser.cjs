@@ -109,7 +109,8 @@ const { chromium, devices } = require('playwright');
           await page.mouse.up();
         }
       };
-      await page.locator('#sub').getByRole('button', { name: 'KMP', exact: true }).click();
+      await page.locator('#sub').getByRole('button', { name: 'Track Editor', exact: true }).click();
+      await page.locator('#sheet').getByRole('button', { name: 'KMP', exact: false }).click();
       assert.equal(await page.evaluate(() => __pm.TRACKVIEW.action), 'place', 'empty KMP starts in placement mode');
       await tap(await page.evaluate(() => __pm.screenOf(0, 0, 2)));
       let start = await page.evaluate(() => __pm.S.track.start);
@@ -185,7 +186,8 @@ const { chromium, devices } = require('playwright');
       });
       assert.ok(Math.abs(rotated - 90) < 0.001);
       await page.evaluate(() => __pm.undo());
-      await page.locator('#sub').getByRole('button', { name: 'KCL', exact: true }).click();
+      await page.locator('#sub').getByRole('button', { name: 'Track Editor', exact: true }).click();
+      await page.locator('#sheet').getByRole('button', { name: 'KCL', exact: false }).click();
       for (const name of ['Move gizmo', 'Rotate gizmo', 'Scale gizmo'])
         assert.ok(await page.getByRole('button', { name, exact: true }).isVisible());
       await page.getByRole('button', { name: 'Materials & flags', exact: true }).click();
@@ -229,7 +231,8 @@ const { chromium, devices } = require('playwright');
         Array.from({ length: 103 }, (_, i) => ['file' + i + '.bin', new Uint8Array([i])]),
       );
       const original = api.encodeYaz0(makeU8(contents));
-      await page.locator('#sub').getByRole('button', { name: 'SZS', exact: true }).click();
+      await page.locator('#sub').getByRole('button', { name: 'Track Editor', exact: true }).click();
+      await page.locator('#sheet').getByRole('button', { name: 'SZS', exact: false }).click();
       await page
         .locator('#fileSZS')
         .setInputFiles({ name: 'sample.szs', mimeType: 'application/octet-stream', buffer: Buffer.from(original) });

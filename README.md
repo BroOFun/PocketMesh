@@ -51,6 +51,7 @@ src/             source modules, concatenated by build.mjs into docs/index.html
   DATA-FORMAT.md mesh and scene data format shared by the modules
   mesh.js        mesh data structure, primitives, modeling operators
   uv.js          unwrapping, projections, packing, straightening
+  extrude.js     Cursor extrusion and optional source/destination rotation
   modifiers.js   Catmull–Clark / Simple subdivision
   materials.js   basic MTL reader
   brres.js       static MDL0 + TEX0 BRRES writer
@@ -83,3 +84,8 @@ cd test && npm install && npm run test:export
 ```
 
 `build.mjs` writes the app into `docs/`: one `index.html`, a vendored copy of three.js r160 (MIT, see `docs/vendor/THREE-LICENSE.txt`), the web app manifest, the offline service worker and icons. Serve `docs/` over HTTPS for the service worker and Home Screen install to work.
+
+Track tools are grouped under **Track Editor → Course Model / KCL / KMP / SZS**.
+Wii scene exports share a 100× default scale while the editor remains at modeling
+size. In Edit Mode, **Extrude** offers **Tap extrude**, **Rotate to tap**, and
+**Rotate source** controls; tap extrusion and tap rotation default off.

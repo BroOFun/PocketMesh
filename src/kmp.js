@@ -35,7 +35,9 @@ export function normalizeTrack(data = {}) {
         }
       : null;
   return {
-    scale: Number.isFinite(scale) && scale >= 0.001 && scale <= 100000 ? scale : 1,
+    // Migrate the old 1:1 default without changing deliberately customized scales.
+    scale: Number.isFinite(scale) && scale >= 0.001 && scale <= 100000 && (scale !== 1 || data.scaleVersion === 1) ? scale : 100,
+    scaleVersion: 1,
     start,
     clearance: Number.isFinite(data.clearance) ? Math.max(0, Math.min(100, data.clearance)) : 0.2,
     template: typeof data.template === 'string' ? data.template : null,

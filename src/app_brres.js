@@ -20,7 +20,7 @@ function brresCanvas(image) {
   return canvas;
 }
 function brresSize(bytes) { return bytes >= 1048576 ? (bytes/1048576).toFixed(2)+' MiB' : (bytes/1024).toFixed(1)+' KiB'; }
-function openBRRESEditor() { openSheet('BRRES Editor',buildBRRESEditor,{panel:true,kind:'brres'}); }
+function openBRRESEditor() { openSheet('Course Model · BRRES',buildBRRESEditor,{panel:true,kind:'brres'}); }
 function brresEditorError(error) { BRED.error = error.message || String(error); if (SHEET.kind === 'brres') refreshSheet(true); toast(BRED.error,true); }
 function brresSelectResource(value) {
   BRED.selected = String(value).startsWith('material:') ? String(value) : Number(value);
@@ -51,6 +51,10 @@ function buildBRRESMaterial(body, material) {
   body.append(card);
 }
 function buildBRRESEditor(body) {
+  body.append(h('div', {class:'card'}, h('h3',{},'Course Model'), trackScaleField(),
+    h('p',{class:'muted'},`${S.track.scale}× on scene export. KCL and KMP follow the course model scale. The modeling viewport keeps its original size. Opened BRRES files retain their existing coordinates.`),
+    h('div',{class:'row'},trackButton('Use 100×',()=>setTrackScale(100)),trackButton('Edit geometry',()=>{setWorkspace('model');setWorkView('3d');})),
+    trackButton('Export course model…',()=>{settingsSet('export',{...settingsGet('export',{}),fmt:'brres',zip:false});openExport();})));
   body.append(h('div',{class:'row'},h('button',{class:'btn primary',onclick:() => $('#fileBRRES').click()},'Open BRRES…'),h('button',{class:'btn',onclick:() => {
     try { const file = runExport('brres',{baseName:'course_model',scale:S.track.scale,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
   }},'Use current scene')));

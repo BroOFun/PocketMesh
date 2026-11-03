@@ -152,6 +152,15 @@ function buildSubbar() {
     bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
     return;
   }
+  if (S.tool === 'extrude' && S.mode === 'edit') {
+    const toggle = (key) => { S[key] = !S[key]; settingsSet(key, S[key]); buildSubbar(); extrudeHint(); };
+    bar.prepend(chip('', 'Drag extrude', opExtrude),
+      chip('', 'Tap extrude', () => toggle('extrudeTap'), {on: S.extrudeTap}),
+      chip('', 'Rotate to tap', () => toggle('extrudeRotate'), {on: S.extrudeRotate}));
+    if (S.extrudeRotate) bar.append(chip('', 'Rotate source', () => toggle('extrudeRotateSource'), {on: S.extrudeRotateSource}));
+    bar.append(chip('', 'Done', () => { if (TF.active) tfConfirm(); S.tool = 'select'; hint(null); buildSubbar(); buildTools(); gizmoSync(); }, {aria: 'Done extruding'}));
+    return;
+  }
   if (S.creaseEdit === S.active?.id && S.mode === 'edit') {
     bar.prepend(chip('', 'Mark Creases', () => changeSelectedCreases(true)),
       chip('', 'Remove Creases', () => changeSelectedCreases(false)),
@@ -186,10 +195,11 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  for (const t of (S.workspace === 'model' ? TOOLS3D : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
+  const modelTools = S.mode === 'edit' ? [...TOOLS3D.slice(0,4), ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : TOOLS3D;
+  for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
@@ -339,7 +349,6 @@ function buildShelf() {
   if (S.mode === 'object') {
     sh.append(
       shelfBtn('Add', 'plus', menuAdd, true), shelfBtn('Edit Mode', 'edit', () => setMode('edit')), g(),
-      shelfBtn('Move', 'move', () => tfStart('move')), shelfBtn('Rotate', 'rotate', () => tfStart('rotate')), shelfBtn('Scale', 'scale', () => tfStart('scale')), g(),
       shelfBtn('Duplicate', 'duplicate', opDuplicate), shelfBtn('Delete', 'trash', () => opDelete()), shelfBtn('Join', 'join', opJoin),
       shelfBtn('Separate', 'separate', () => menuSheet('Separate', [{ label: 'By Material', icon: 'material', desc: 'One object per material slot', run: () => opSeparate('material') }, { label: 'By Loose Parts', icon: 'separate', desc: 'One object per disconnected piece', run: () => opSeparate('loose') }]), true),
       shelfBtn('Shading', 'smooth', () => menuSheet('Shading', [{ label: 'Shade Smooth', icon: 'smooth', run: () => opNormals('smooth') }, { label: 'Shade Flat', icon: 'cube', run: () => opNormals('flat') }, { group: 'Normals' }, { label: 'Recalculate Outside', icon: 'normals', run: () => opNormals('outside') }, { label: 'Flip Normals', icon: 'normals', run: () => opNormals('flip') }]), true),
@@ -350,8 +359,7 @@ function buildShelf() {
   } else {
     sh.append(
       shelfBtn('Add', 'plus', menuAdd, true), shelfBtn('Select', 'selall', menuSelect, true), g(),
-      shelfBtn('Move', 'move', () => tfStart('move')), shelfBtn('Rotate', 'rotate', () => tfStart('rotate')), shelfBtn('Scale', 'scale', () => tfStart('scale')), g(),
-      shelfBtn('Extrude', 'extrude', opExtrude), shelfBtn('Inset', 'inset', opInset), shelfBtn('Loop Cut', 'loopcut', opLoopCutStart), shelfBtn('Subdivide', 'subdivide', opSubdivide),
+      shelfBtn('Extrude', 'extrude', activateExtrude), shelfBtn('Inset', 'inset', opInset), shelfBtn('Loop Cut', 'loopcut', opLoopCutStart), shelfBtn('Subdivide', 'subdivide', opSubdivide),
       shelfBtn('Fill', 'fill', menuFill, true), shelfBtn('Merge', 'merge', menuMerge, true), shelfBtn('Delete', 'trash', menuDelete, true), shelfBtn('Duplicate', 'duplicate', opDuplicate),
       shelfBtn('Mesh', 'cube', menuMesh, true), g(),
       shelfBtn('UV', 'uv', menuUVFrom3D, true), shelfBtn('Seams', 'seam', () => menuSheet('UV Seams', [{ label: 'Mark Seam', icon: 'seam', desc: 'Selected edges become cuts for Unwrap', run: () => opSeam(true) }, { label: 'Clear Seam', icon: 'seam', run: () => opSeam(false) }]), true),
@@ -513,12 +521,8 @@ function menuFile() {
     { label: 'New Scene', icon: 'file', desc: 'Start over with a cube', run: confirmNew },
     { label: 'Open Project…', icon: 'folder', desc: 'A .pocketmesh.json file', run: () => $('#fileProj').click() },
     { label: 'Save Project', icon: 'save', desc: 'Save to Files, iCloud Drive, AirDrop…', run: saveProjectFile },
-    { group: 'Track workspaces' },
-    { label: 'KCL Editor', icon: 'layers', run: () => { setWorkspace('kcl'); openKCL(); } },
-    { label: 'KMP Editor', icon: 'cursor', run: () => { setWorkspace('kmp'); openKMP(); } },
-    { label: 'SZS Editor…', icon: 'folder', desc: 'Open a track archive and replace its files', run: openSZSEditor },
+    { label: 'Track Editor', icon: 'layers', desc: 'Course Model · KCL · KMP · SZS', run: openTrackEditor },
     { group: 'Exchange' },
-    { label: 'BRRES Editor…', icon: 'folder', desc: 'Inspect resources, preview and resize textures', run: openBRRESEditor },
     { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
     { label: 'Export as BRRES…', icon: 'export', desc: 'Wii model and textures', run: () => { settingsSet('export', { ...settingsGet('export', {}), fmt: 'brres', zip: false }); openExport(); } },
     { label: 'Import OBJ + materials…', desc: 'Select OBJ, MTL and images together', icon: 'import', run: () => $('#fileObj').click() },
@@ -908,7 +912,8 @@ function buildExport(body) {
     checkInput('Always wrap in a .zip', st.zip, (v) => { st.zip = v; save(); }));
   if (st.fmt === 'brres') opts.append(
     h('p', { class: 'muted', id: 'brresScope' }, `${selectedOnly && anySel ? 'Selected visible objects' : 'All visible objects'}: ${S.objects.filter((o) => o.visible && (!(selectedOnly && anySel) || o.selected)).length}. Includes their assigned materials and image textures together in one BRRES. Color-only materials are included too.`),
-    field('Wii units per model unit', numInput(S.track.scale, (v) => { st.scale = v; save(); setTrackScale(v); }, { min: 0.001, max: 100000 })),
+    trackScaleField(),
+    h('p', {class: 'muted'}, `${S.track.scale}× course model scale. KCL and KMP follow this same scale; the modeling viewport keeps its original size.`),
     field('Maximum texture size', selectInput(st.textureSize || 512, [64, 128, 256, 512, 1024].map((v) => [v, v + ' px']), (v) => { st.textureSize = +v; save(); }, 'BRRES texture size')),
     h('p', { class: 'muted' }, 'Exports evaluated modifiers, applies transforms and converts Z-up to Wii Y-up. Textures are resized to power-of-two dimensions and embedded as RGBA8. Basic unlit color/texture, cutout and alpha blend are supported; PBR lighting and metallic effects are not exported.'));
   const go = h('button', { class: 'btn primary', style: { height: '46px', fontSize: '17px', justifyContent: 'center' } }, h('span', { html: icon('export') }), st.fmt === 'brres' ? 'Export & Send BRRES…' : 'Export & Save…');
@@ -1011,12 +1016,14 @@ onSelectionChanged = () => {
   refreshSheet();
 };
 onModeChanged = () => {
+  if (S.tool === 'extrude' && (S.mode !== 'edit' || S.workspace !== 'model')) { S.tool = 'select'; hint(null); }
   if (S.creaseEdit && (S.mode !== 'edit' || S.active?.id !== S.creaseEdit || S.workspace !== 'model')) { S.creaseEdit = null; S.multiSelect = false; S.selOp = 'set'; hint(null); }
   buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
   $('#selModes').hidden = S.workspace !== 'model' || S.mode !== 'edit';
   for (const b of document.querySelectorAll('#selModes button')) b.classList.toggle('on', b.dataset.sm === S.selectMode);
   buildShelf();
+  buildTools();
   refreshSheet();
 };
 onHistoryChanged = () => {
@@ -1069,7 +1076,8 @@ c3d.addEventListener('pointerdown', (e) => {
   G.maxPointers = Math.max(G.maxPointers, G.p.size);
   if (G.p.size === 1) {
     G.t0 = performance.now(); G.moved = false; G.maxPointers = 1;
-    if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
+    if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && !TF.active && !PM.active) G.mode = 'extrudeTap';
+    else if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
     if (G.mode === 'pending') beginHold(e, p);
@@ -1144,6 +1152,7 @@ function endPointer(e) {
   if (e.type === 'pointerup') {
     if (G.maxPointers === 2 && !G.moved && quick && G.mode !== 'box') { if (TF.active) tfCancel(); else if (PM.active) pmCancel(); else undo(); }
     else if (G.maxPointers >= 3 && !G.moved && quick) redo();
+    else if (G.mode === 'extrudeTap' && !G.moved) tapExtrudeAt(pt.x, pt.y);
     else if (G.mode === 'pending' && !G.moved) handleTap(pt.x, pt.y, pt.type);
     else if (G.mode === 'tfclick' && !G.moved) tfConfirm();
     else if (G.mode === 'box' && G.box && G.box.x1 !== undefined) boxSelect(G.box, S.selOp);
@@ -1164,6 +1173,7 @@ document.addEventListener('gesturechange', (e) => e.preventDefault());
 function handleTap(x, y, ptype) {
   if (TF.active || PM.active) return;
   if (S.workspace !== 'model') { trackTap(x,y); return; }
+  if (S.tool === 'extrude' && S.extrudeTap) { tapExtrudeAt(x,y); return; }
   const radius = ptype === 'mouse' ? 14 : 28;
   if (S.pendingTap === 'loopcut') { loopCutAt(x, y); return; }
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
@@ -1384,12 +1394,15 @@ document.addEventListener('keydown', (e) => {
     case 'p': if (edit) opSeparate('selected'); break;
     case 'n': openProps(); break;
     case 'h': if (!edit) opHide('hide'); break;
-    case 'escape': S.pendingTap = null; if (S.tool === 'ruler') { if (RULER.first) rulerResetPending(); else rulerDone(); } hint(null); break;
+    case 'escape': S.pendingTap = null; if (S.tool === 'extrude') { S.tool = 'select'; buildSubbar(); buildTools(); gizmoSync(); } if (S.tool === 'ruler') { if (RULER.first) rulerResetPending(); else rulerDone(); } hint(null); break;
   }
 });
 
 // ---------- boot ----------
 function loadSettings() {
+  S.extrudeTap = settingsGet('extrudeTap', false) === true;
+  S.extrudeRotate = settingsGet('extrudeRotate', false) === true;
+  S.extrudeRotateSource = settingsGet('extrudeRotateSource', true) !== false;
   S.orient = settingsGet('orient', 'global');
   S.pivot = settingsGet('pivot', 'median');
   S.snap = settingsGet('snap', false);
@@ -1432,7 +1445,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

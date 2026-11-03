@@ -52,7 +52,7 @@ const {chromium,devices}=require('playwright');
    const im=__pm.addImageFromCanvas('test.png',c);__pm.S.materials[0].texture=im.id;__pm.S.materials[0].useTexture=true;
    return Array.from(__pm.runExport('brres',{baseName:'editor-test',scale:1,textureSize:64}).data);
   });
-  await page.locator('#btnMenu').click();await page.getByRole('button',{name:/BRRES Editor/}).click();
+  await page.locator('#sub').getByRole('button',{name:'Track Editor',exact:true}).click();await page.locator('#sheet').getByRole('button',{name:/Course Model/}).click();
   await page.locator('#fileBRRES').setInputFiles({name:'editor-test.brres',mimeType:'application/octet-stream',buffer:Buffer.from(bytes)});
   await page.getByLabel('Texture width',{exact:true}).waitFor();
   assert.ok(await page.getByText('64 × 32 px · RGBA8 (6)',{exact:true}).isVisible());
