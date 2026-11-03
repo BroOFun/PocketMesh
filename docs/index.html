@@ -226,6 +226,17 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
 .welcome { display: grid; gap: 8px; font-size: 15px; line-height: 1.45; }
 .welcome b { color: var(--sel); font-weight: 600; }
 :focus-visible { outline: 2px solid var(--on); outline-offset: 1px; }
+.collision-material-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px; }
+.collision-material { display:flex;flex-direction:column;gap:4px;text-align:left;padding:7px;border:1px solid var(--line);border-radius:9px;background:var(--panel);overflow-wrap:anywhere;cursor:pointer;min-width:0; }
+.collision-material.on { border-color:var(--on);background:var(--on-bg); }
+.collision-material span,.collision-material strong { font-size:12px; }
+.collision-preview { display:block;width:100%;height:72px;object-fit:contain;border-radius:5px; }
+.collision-preview.large { height:160px; }
+.szs-list { display:grid;gap:4px;height:280px;min-height:120px;overflow:auto;grid-auto-rows:max-content;align-content:start; }
+.szs-entry { text-align:left;display:grid;gap:3px;padding:8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);overflow-wrap:anywhere;min-width:0;cursor:pointer; }
+.szs-entry.on { border-color:var(--on);background:var(--on-bg); }
+.szs-entry small { color:var(--fg-dim); }
+.szs-folder { padding:5px 8px;font-weight:600;overflow-wrap:anywhere; }
 </style>
 
 </head>
@@ -275,6 +286,8 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   <input type="file" id="fileProj" accept=".json,application/json" hidden>
   <input type="file" id="fileObj" multiple hidden>
   <input type="file" id="fileMat" multiple hidden>
+  <input type="file" id="fileSZS" accept=".szs,.u8,.arc" hidden>
+  <input type="file" id="fileSZSReplace" hidden>
   <input type="file" id="fileKMP" accept=".kmp" hidden>
   <input type="file" id="fileBRRES" accept=".brres" hidden>
   <input type="file" id="fileBRRESTexture" accept="image/*" hidden>
@@ -6313,6 +6326,252 @@ function exportKMP(start, { scale = 1, template = null } = {}) {
   return bytes;
 }
 
+// ==== szs.js ====
+// Mario Kart Wii SZS = Yaz0-compressed U8. Original implementation from the format specs:
+// https://mkwiiki.org/wiki/U8_(File_Format), https://mkwiiki.org/wiki/Yaz0_(File_Format)
+const SZS_MAX_SIZE = 128 * 1024 * 1024;
+function _szsBytes(input) {
+  if (input instanceof Uint8Array) return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+  if (input instanceof ArrayBuffer) return new Uint8Array(input);
+  throw new Error('Expected archive bytes');
+}
+function _szsMagic(b, magic) {
+  return b.length >= 4 && magic.every((v, i) => b[i] === v);
+}
+function decodeYaz0(input) {
+  const b = _szsBytes(input);
+  if (b.length < 16 || !_szsMagic(b, [89, 97, 122, 48])) throw new Error('Not a Yaz0 stream');
+  const size = new DataView(b.buffer, b.byteOffset, b.byteLength).getUint32(4);
+  if (size > SZS_MAX_SIZE) throw new Error('Archive exceeds the 128 MiB unpacked limit');
+  const out = new Uint8Array(size);
+  let src = 16,
+    dst = 0;
+  const read = () => {
+    if (src >= b.length) throw new Error('Truncated Yaz0 stream');
+    return b[src++];
+  };
+  while (dst < size) {
+    const bits = read();
+    for (let mask = 128; mask && dst < size; mask >>= 1) {
+      if (bits & mask) out[dst++] = read();
+      else {
+        const first = read(),
+          second = read(),
+          distance = (((first & 15) << 8) | second) + 1;
+        const length = first >>> 4 ? (first >>> 4) + 2 : read() + 18;
+        if (distance > dst || dst + length > size) throw new Error('Invalid Yaz0 back-reference');
+        for (let i = 0; i < length; i++) {
+          out[dst] = out[dst - distance];
+          dst++;
+        }
+      }
+    }
+  }
+  return out;
+}
+function encodeYaz0(input) {
+  const data = _szsBytes(input),
+    n = data.length;
+  if (n > SZS_MAX_SIZE) throw new Error('Archive exceeds the 128 MiB unpacked limit');
+  const out = new Uint8Array(16 + n + Math.ceil(n / 8));
+  out.set([89, 97, 122, 48]);
+  new DataView(out.buffer).setUint32(4, n);
+  const head = new Int32Array(65536).fill(-1),
+    previous = new Int32Array(4096).fill(-1);
+  const hash = (p) => ((data[p] * 251 + data[p + 1]) * 251 + data[p + 2]) & 65535;
+  const insert = (p) => {
+    if (p + 2 < n) {
+      const h = hash(p);
+      previous[p & 4095] = head[h];
+      head[h] = p;
+    }
+  };
+  let pos = 0,
+    write = 16;
+  while (pos < n) {
+    const codeAt = write++;
+    let code = 0;
+    for (let bit = 128; bit && pos < n; bit >>= 1) {
+      let best = 0,
+        back = 0;
+      if (pos + 2 < n) {
+        let candidate = head[hash(pos)],
+          tries = 0;
+        const low = Math.max(0, pos - 4096),
+          max = Math.min(273, n - pos);
+        while (candidate >= low && candidate < pos && tries++ < 64) {
+          if (
+            data[candidate] === data[pos] &&
+            data[candidate + 1] === data[pos + 1] &&
+            data[candidate + 2] === data[pos + 2]
+          ) {
+            let length = 3;
+            while (length < max && data[candidate + length] === data[pos + length]) length++;
+            if (length > best) {
+              best = length;
+              back = pos - candidate - 1;
+              if (length === max) break;
+            }
+          }
+          const next = previous[candidate & 4095];
+          if (next >= candidate) break;
+          candidate = next;
+        }
+      }
+      if (best >= 3) {
+        if (best < 18) {
+          out[write++] = ((best - 2) << 4) | (back >>> 8);
+          out[write++] = back & 255;
+        } else {
+          out[write++] = back >>> 8;
+          out[write++] = back & 255;
+          out[write++] = best - 18;
+        }
+        for (let i = 0; i < best; i++) insert(pos++);
+      } else {
+        code |= bit;
+        out[write++] = data[pos];
+        insert(pos++);
+      }
+    }
+    out[codeAt] = code;
+  }
+  return out.slice(0, write);
+}
+function inspectSZS(input) {
+  const source = _szsBytes(input);
+  if (source.length > (SZS_MAX_SIZE * 9) / 8 + 16) throw new Error('Archive exceeds the supported size limit');
+  const original = Uint8Array.from(source),
+    compressed = _szsMagic(original, [89, 97, 122, 48]),
+    bytes = compressed ? decodeYaz0(original) : original;
+  if (bytes.length < 32 || !_szsMagic(bytes, [85, 170, 56, 45]))
+    throw new Error('Open a Mario Kart Wii U8/SZS archive. This file is not a U8 archive.');
+  if (bytes.length > SZS_MAX_SIZE) throw new Error('Archive exceeds the 128 MiB unpacked limit');
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength),
+    root = view.getUint32(4),
+    headerSize = view.getUint32(8),
+    dataOffset = view.getUint32(12),
+    headerEnd = root + headerSize;
+  if (
+    root < 32 ||
+    root % 4 ||
+    root + 12 > bytes.length ||
+    headerEnd > bytes.length ||
+    headerEnd > dataOffset ||
+    dataOffset > bytes.length
+  )
+    throw new Error('Invalid U8 header bounds');
+  const count = view.getUint32(root + 8);
+  if (
+    bytes[root] !== 1 ||
+    view.getUint32(root + 4) !== 0 ||
+    count < 1 ||
+    count > 50000 ||
+    root + count * 12 >= headerEnd
+  )
+    throw new Error('Invalid U8 root or node count');
+  const strings = root + count * 12,
+    nodes = [],
+    stack = [],
+    paths = new Set();
+  const nameAt = (offset) => {
+    let start = strings + offset,
+      end = start;
+    if (start >= headerEnd) throw new Error('Invalid U8 name offset');
+    while (end < headerEnd && bytes[end]) end++;
+    if (end === headerEnd) throw new Error('Unterminated U8 name');
+    return new TextDecoder().decode(bytes.subarray(start, end));
+  };
+  for (let i = 0; i < count; i++) {
+    const at = root + i * 12,
+      type = bytes[at],
+      nameOffset = view.getUint32(at) & 0xffffff,
+      name = nameAt(nameOffset),
+      offset = view.getUint32(at + 4),
+      size = view.getUint32(at + 8);
+    if (type !== 0 && type !== 1) throw new Error('Unsupported U8 node type');
+    if (i === 0) {
+      if (name !== '' || type !== 1) throw new Error('Invalid U8 root name');
+      nodes.push({ id: 0, name: '', path: '', parent: 0, depth: 0, directory: true, end: count });
+      stack.push(nodes[0]);
+      continue;
+    }
+    while (stack.length && i >= stack[stack.length - 1].end) stack.pop();
+    const parent = stack[stack.length - 1];
+    if (
+      !parent ||
+      !name ||
+      name === '..' ||
+      /[\/\\\x00]/.test(name) ||
+      (name === '.' && (parent.id !== 0 || type !== 1))
+    )
+      throw new Error('Invalid U8 directory or filename');
+    const path = (parent.path ? parent.path + '/' : '') + name;
+    if (paths.has(path)) throw new Error('Duplicate U8 path: ' + path);
+    paths.add(path);
+    const node = { id: i, name, path, parent: parent.id, depth: parent.depth + 1, directory: type === 1 };
+    if (type === 1) {
+      if (offset !== parent.id || size <= i || size > parent.end) throw new Error('Invalid U8 directory range');
+      node.end = size;
+      stack.push(node);
+    } else {
+      if (offset > bytes.length || size > bytes.length - offset || (size && offset < dataOffset))
+        throw new Error('File extends outside the U8 archive: ' + path);
+      node.offset = offset;
+      node.size = size;
+    }
+    nodes.push(node);
+  }
+  return { original, bytes, compressed, root, headerEnd, dataOffset, nodes };
+}
+function szsEntryBytes(archive, id, changes = new Map()) {
+  const node = archive.nodes[id];
+  if (!node || node.directory) throw new Error('Select an archive file');
+  return changes.has(id) ? _szsBytes(changes.get(id)) : archive.bytes.subarray(node.offset, node.offset + node.size);
+}
+function saveSZS(archive, changes = new Map(), { compressed = true } = {}) {
+  if (!changes.size && compressed === archive.compressed) return archive.original.slice();
+  for (const [id, data] of changes) {
+    if (!archive.nodes[id] || archive.nodes[id].directory) throw new Error('Invalid replacement target');
+    if (_szsBytes(data).length > SZS_MAX_SIZE) throw new Error('Replacement is too large');
+  }
+  const align = (n) => Math.ceil(n / 32) * 32,
+    dataOffset = align(archive.headerEnd),
+    offsets = new Map();
+  let size = dataOffset;
+  for (const node of archive.nodes)
+    if (!node.directory) {
+      const data = szsEntryBytes(archive, node.id, changes);
+      size = align(size);
+      offsets.set(node.id, size);
+      size += data.length;
+      if (size > SZS_MAX_SIZE) throw new Error('Updated archive exceeds the 128 MiB unpacked limit');
+    }
+  const bytes = new Uint8Array(align(size));
+  bytes.set(archive.bytes.subarray(0, archive.headerEnd));
+  const view = new DataView(bytes.buffer);
+  view.setUint32(12, dataOffset);
+  for (const node of archive.nodes)
+    if (!node.directory) {
+      const data = szsEntryBytes(archive, node.id, changes),
+        offset = offsets.get(node.id),
+        at = archive.root + node.id * 12;
+      view.setUint32(at + 4, offset);
+      view.setUint32(at + 8, data.length);
+      bytes.set(data, offset);
+    }
+  return compressed ? encodeYaz0(bytes) : bytes;
+}
+function szsFileType(bytes, name = '') {
+  const b = _szsBytes(bytes);
+  if (_szsMagic(b, [98, 114, 101, 115])) return 'BRRES';
+  if (_szsMagic(b, [82, 75, 77, 68])) return 'KMP';
+  if (_szsMagic(b, [89, 97, 122, 48])) return 'Yaz0';
+  if (_szsMagic(b, [85, 170, 56, 45])) return 'U8';
+  const ext = name.includes('.') ? name.split('.').pop().toUpperCase() : '';
+  return ext || 'Binary';
+}
+
 // ==== app_core.js ====
 // ============================================================================
 // app_core.js — renderer, scene objects, overlays, camera, picking, selection, undo
@@ -7808,15 +8067,17 @@ function pmCancel() {
 let GZ = null;
 function gizmoSync() {
   const toolMode = { move: 'translate', rotate: 'rotate', scale: 'scale' }[S.tool];
-  const show = S.workspace === 'model' && !!toolMode && !TF.active && !PM.active && hasAnySel() && S.view !== 'uv';
+  const startTool = S.workspace === 'kmp';
+  const show = !!toolMode && !TF.active && !PM.active && S.view !== 'uv' && (startTool ? !!S.track.start && S.tool !== 'scale' : hasAnySel());
   tc.enabled = show; tc.visible = show;
   if (!show) { requestRender(); return; }
   tc.setMode(toolMode);
+  tc.showX = tc.showY = !(startTool && toolMode === 'rotate'); tc.showZ = true;
   tc.setTranslationSnap(S.snap ? S.snapMove : null);
   tc.setRotationSnap(S.snap ? S.snapRot * DEG : null);
   tc.setScaleSnap(S.snap ? S.snapScale : null);
   if (!tc.dragging) {
-    const st = tfBuildState('move');
+    const st = startTool ? {pivot: new THREE.Vector3(...S.track.start.position), orient: new THREE.Quaternion()} : tfBuildState('move');
     if (st) {
       gizmoProxy.position.copy(st.pivot);
       gizmoProxy.quaternion.copy(st.orient);
@@ -7827,6 +8088,10 @@ function gizmoSync() {
   requestRender();
 }
 tc.addEventListener('mouseDown', () => {
+  if (S.workspace === 'kmp') {
+    GZ = S.track.start ? {start: structuredClone(S.track.start), axis: tc.axis, p0: gizmoProxy.position.clone(), q0: gizmoProxy.quaternion.clone()} : null;
+    return;
+  }
   GZ = { st: tfBuildState({ translate: 'move', rotate: 'rotate', scale: 'scale' }[tc.mode]), p0: gizmoProxy.position.clone(), q0: gizmoProxy.quaternion.clone() };
   if (!GZ.st) GZ = null;
 });
@@ -7834,12 +8099,21 @@ tc.addEventListener('objectChange', () => {
   if (!GZ) return;
   const T = gizmoProxy.position.clone().sub(GZ.p0);
   const R = gizmoProxy.quaternion.clone().multiply(GZ.q0.clone().invert());
+  if (GZ.start) {
+    if (tc.mode === 'translate') S.track.start.position = GZ.start.position.map((n, i) => n + T.getComponent(i));
+    else S.track.start.rotation[1] = GZ.start.rotation[1] + new THREE.Euler().setFromQuaternion(R, 'XYZ').z / DEG;
+    requestRender(); return;
+  }
   const Sv = gizmoProxy.scale.clone();
   GZ.st.orient = GZ.q0.clone();
   tfApplyState(GZ.st, { T, R, S: Sv });
+  if (S.workspace === 'kcl') trackRefresh();
 });
 tc.addEventListener('mouseUp', () => {
   if (!GZ) return;
+  if (GZ.start && tc.mode === 'translate' && GZ.axis && !GZ.axis.includes('Z')) {
+    try { trackSnapStart(); gizmoProxy.position.fromArray(S.track.start.position); } catch (e) { toast(e.message, true); }
+  }
   GZ = null;
   pushUndo({ translate: 'Move', rotate: 'Rotate', scale: 'Scale' }[tc.mode]);
   onSelectionChanged();
@@ -9480,6 +9754,7 @@ function trackCommit(label) {
   trackRefresh();
   buildSubbar();
   refreshSheet(true);
+  gizmoSync();
   requestRender();
 }
 function setTrackScale(value) {
@@ -9507,7 +9782,7 @@ function setWorkspace(workspace) {
   if (workspace !== 'model' && S.mode === 'edit') setMode('object');
   S.workspace = workspace;
   S.tool = 'select';
-  TRACKVIEW.action = 'select';
+  TRACKVIEW.action = workspace === 'kmp' && !S.track.start ? 'place' : 'select';
   if (workspace !== 'model' && S.view !== '3d') setWorkView('3d');
   $('#btnMode').hidden = workspace !== 'model';
   $('#btnView').hidden = workspace !== 'model';
@@ -9535,6 +9810,7 @@ function trackSubbar(bar) {
       setWorkspace,
     ),
   );
+  bar.append(trackButton('SZS', openSZSEditor));
   if (S.workspace === 'model') return false;
   bar.append(
     trackButton(S.workspace === 'kcl' ? 'Materials & flags' : 'Start point', S.workspace === 'kcl' ? openKCL : openKMP),
@@ -9569,12 +9845,33 @@ function buildTrackShelf(sh) {
   );
   return true;
 }
+function trackTool(tool) {
+  if (GZ && tc.dragging) return;
+  if (S.workspace === 'kmp' && ['move', 'rotate'].includes(tool) && !S.track.start) {
+    trackAction('place');
+    toast('Tap the track to place Start first');
+    return;
+  }
+  closeSheet();
+  S.tool = tool;
+  TRACKVIEW.action = 'select';
+  S.pendingTap = null;
+  hint(
+    tool === 'move' && S.workspace === 'kmp'
+      ? 'Drag the start arrows. X/Y movement snaps height; Z adjusts height directly.'
+      : null,
+  );
+  buildTools();
+  gizmoSync();
+}
 function trackAction(action) {
   if (action === 'aim' && !S.track.start) {
     toast('Place a start point first', true);
     return;
   }
   closeSheet();
+  S.tool = 'select';
+  cancelViewportGesture();
   TRACKVIEW.action = action;
   hint(
     action === 'place'
@@ -9582,6 +9879,7 @@ function trackAction(action) {
       : 'Tap ahead of Start to set the driving direction.',
   );
   buildTools();
+  gizmoSync();
 }
 function trackScene() {
   const ids = new Map(S.materials.map((m, i) => [m.id, i]));
@@ -9746,18 +10044,30 @@ function drawTrack() {
     label(p, 'Start · ' + fmt(start.rotation[1], 1) + '°', '#71f0aa');
   }
 }
+// Picking must not depend on display shading, backface culling, or assigned KCL flags.
+const trackPickMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+function trackHitMaterial(hit) {
+  const o = hit.object.userData.obj;
+  const f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]];
+  return matById(o.materials[f.mat] ?? o.materials[0]);
+}
+function trackIsDrivable(hit) {
+  const m = trackHitMaterial(hit);
+  const type = m?.kclFinish ? 0 : (m?.kclFlag ?? 0) & 31;
+  return m?.kclEnabled !== false && [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 19, 21, 22, 23, 29].includes(type);
+}
 function trackHits(ray, drivable = false) {
   scene.updateMatrixWorld(true);
   const nodes = S.objects.filter((o) => o.visible).map((o) => o.meshNode);
-  return ray.intersectObjects(nodes, false).filter((hit) => {
-    if (!drivable) return true;
-    const o = hit.object.userData.obj,
-      f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]],
-      m = matById(o.materials[f.mat] ?? o.materials[0]);
-    if (m?.kclEnabled === false) return false;
-    const type = m?.kclFinish ? 0 : (m?.kclFlag ?? 0) & 31;
-    return [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 19, 21, 22, 23, 29].includes(type);
-  });
+  const materials = nodes.map((node) => node.material);
+  try {
+    for (const node of nodes) node.material = trackPickMaterial;
+    return ray.intersectObjects(nodes, false).filter((hit) => !drivable || trackIsDrivable(hit));
+  } finally {
+    nodes.forEach((node, i) => {
+      node.material = materials[i];
+    });
+  }
 }
 function trackTap(x, y) {
   if (S.workspace === 'kcl') {
@@ -9766,17 +10076,18 @@ function trackTap(x, y) {
     const o = hit.object.userData.obj,
       f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]];
     TRACKVIEW.material = o.materials[f.mat] ?? o.materials[0];
-    trackRefresh();
-    openKCL();
+    selectObject(o, S.selOp);
+    if (S.tool === 'select') openKCL();
     return;
   }
   if (TRACKVIEW.action === 'select') {
+    if (S.tool === 'move' || S.tool === 'rotate') return;
     openKMP();
     return;
   }
-  const hit = trackHits(screenRay(x, y), true)[0];
+  const hit = trackHits(screenRay(x, y))[0];
   if (!hit) {
-    toast('Tap a visible drivable surface. Check its KCL type.', true);
+    toast('No model surface under that tap. Frame the track, then tap a face.', true);
     return;
   }
   if (TRACKVIEW.action === 'place') {
@@ -9785,7 +10096,12 @@ function trackTap(x, y) {
       rotation: S.track.start?.rotation.slice() || [0, 0, 0],
     };
     trackCommit('Place start');
-    toast('Start placed at road height');
+    toast(
+      trackIsDrivable(hit)
+        ? 'Start placed at surface height'
+        : 'Start placed. Assign a drivable KCL type to this surface before testing.',
+      !trackIsDrivable(hit),
+    );
   } else {
     const p = S.track.start.position,
       dx = hit.point.x - p[0],
@@ -9798,6 +10114,7 @@ function trackTap(x, y) {
   TRACKVIEW.action = 'select';
   hint(null);
   buildTools();
+  gizmoSync();
 }
 function trackSnapStart() {
   if (!S.track.start) throw new Error('Place a start point first');
@@ -9806,10 +10123,10 @@ function trackSnapStart() {
   for (const o of S.objects) if (o.visible) box.expandByObject(o.node);
   if (box.isEmpty()) throw new Error('No track geometry');
   const ray = new THREE.Raycaster(new THREE.Vector3(p[0], p[1], box.max.z + 1), new THREE.Vector3(0, 0, -1));
-  const hits = trackHits(ray, true).sort(
+  const hits = trackHits(ray).sort(
     (a, b) => Math.abs(a.point.z + S.track.clearance - p[2]) - Math.abs(b.point.z + S.track.clearance - p[2]),
   );
-  if (!hits.length) throw new Error('No drivable surface beneath this X/Y position');
+  if (!hits.length) throw new Error('No model surface beneath this X/Y position');
   p[2] = hits[0].point.z + S.track.clearance;
 }
 function trackFocusBox(box) {
@@ -9832,6 +10149,29 @@ function trackFocusStart() {
 function openKCL() {
   openSheet('KCL · Material collision', buildKCL, { panel: true, kind: 'kcl' });
 }
+function trackMaterialPreview(m, large = false) {
+  const image = S.images.get(m.texture);
+  const canvas = h('canvas', {
+    class: 'collision-preview' + (large ? ' large' : ''),
+    width: large ? 256 : 96,
+    height: large ? 160 : 72,
+    'aria-label': 'Texture preview for ' + m.name,
+  });
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = m.color || '#888888';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (image) {
+    const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
+    ctx.drawImage(
+      image.el,
+      (canvas.width - image.width * scale) / 2,
+      (canvas.height - image.height * scale) / 2,
+      image.width * scale,
+      image.height * scale,
+    );
+  }
+  return canvas;
+}
 function buildKCL(body) {
   const ms = trackMaterials(),
     m = trackCurrentMaterial();
@@ -9847,6 +10187,40 @@ function buildKCL(body) {
     return;
   }
   TRACKVIEW.material = m.id;
+  body.append(
+    h(
+      'div',
+      { class: 'collision-material-grid', 'aria-label': 'Material images' },
+      ...ms.map((mat) => {
+        const image = S.images.get(mat.texture);
+        return h(
+          'button',
+          {
+            class: 'collision-material' + (mat.id === m.id ? ' on' : ''),
+            'aria-label': 'Choose material ' + mat.id + ': ' + mat.name,
+            'aria-pressed': String(mat.id === m.id),
+            onclick: () => {
+              TRACKVIEW.material = mat.id;
+              trackRefresh();
+              refreshSheet(true);
+            },
+          },
+          trackMaterialPreview(mat),
+          h('strong', {}, mat.name + ' · #' + mat.id),
+          h('span', { class: 'muted' }, image?.name || 'Color only'),
+          h(
+            'span',
+            {},
+            mat.kclEnabled === false
+              ? 'No collision'
+              : mat.kclFinish
+                ? 'Finish line · Road'
+                : KCL_TYPES[(mat.kclFlag ?? 0) & 31].name,
+          ),
+        );
+      }),
+    ),
+  );
   const flag = m.kclFinish ? 0 : (m.kclFlag ?? 0),
     f = decodeKCLFlag(flag),
     type = KCL_TYPES[f.type];
@@ -9857,6 +10231,19 @@ function buildKCL(body) {
   const c = h(
     'div',
     { class: 'card' },
+    trackMaterialPreview(m, true),
+    h(
+      'span',
+      { class: 'muted' },
+      S.images.has(m.texture)
+        ? S.images.get(m.texture).name +
+            ' · ' +
+            S.images.get(m.texture).width +
+            ' × ' +
+            S.images.get(m.texture).height +
+            (m.useTexture === false ? ' · texture disabled' : '')
+        : 'No image · color ' + m.color,
+    ),
     field(
       'Material',
       selectInput(
@@ -9871,6 +10258,13 @@ function buildKCL(body) {
       ),
     ),
     trackButton('Focus this material', trackFocusMaterial),
+    trackButton('Show textures on track', () => {
+      TRACKVIEW.colors = false;
+      setShading('material');
+      trackRefresh();
+      buildShelf();
+      closeSheet();
+    }),
     checkInput('Include in KCL', m.kclEnabled !== false, (v) => change({ kclEnabled: v })),
     h('b', { id: 'collisionFlag' }, kclHex(flag) + ' · ' + (m.kclFinish ? 'Finish line (normal road)' : type.name)),
   );
@@ -10142,7 +10536,7 @@ function buildKMP(body) {
       h(
         'p',
         { class: 'muted' },
-        'In-game testing still needs course.kcl, course_model.brres and a suitable SZS track package. Existing routes/checkpoints are preserved, not fitted to your new mesh. Full checkpoint/route editing and SZS packaging are not included yet.',
+        'In-game testing needs course.kcl, course_model.brres and a suitable SZS track package. Use the SZS editor to replace these files in an existing package. Existing routes/checkpoints are preserved, not fitted to your new mesh. Full checkpoint/route editing is not included yet.',
       ),
     ),
   );
@@ -10188,6 +10582,396 @@ function trackExport(kind) {
     toast(e.message, true);
   }
 }
+
+// ==== app_szs.js ====
+// Archive changes are separate from project autosave. Export a copy to retain them.
+const SZED = {
+  archive: null,
+  name: '',
+  selected: null,
+  changes: new Map(),
+  search: '',
+  page: 0,
+  busy: '',
+  error: '',
+  target: null,
+};
+function szsWorker(action, payload) {
+  const source =
+    `const SZS_MAX_SIZE=${SZS_MAX_SIZE};\n` +
+    [_szsBytes, _szsMagic, decodeYaz0, encodeYaz0, inspectSZS, szsEntryBytes, saveSZS]
+      .map((fn) => fn.toString())
+      .join('\n') +
+    `\nonmessage=({data})=>{try{const result=data.action==='inspect'?inspectSZS(data.payload):saveSZS(data.payload.archive,data.payload.changes);postMessage({result});}catch(e){postMessage({error:e.message});}};`;
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([source], { type: 'text/javascript' }));
+    let worker, timeout;
+    const done = () => {
+      clearTimeout(timeout);
+      worker?.terminate();
+      URL.revokeObjectURL(url);
+    };
+    try {
+      worker = new Worker(url);
+      timeout = setTimeout(() => {
+        done();
+        reject(new Error('Archive operation timed out. Try a smaller archive.'));
+      }, 120000);
+      worker.onmessage = ({ data }) => {
+        done();
+        data.error ? reject(new Error(data.error)) : resolve(data.result);
+      };
+      worker.onerror = () => {
+        done();
+        reject(new Error('Archive worker failed. Reopen the editor and try again.'));
+      };
+      worker.postMessage({ action, payload });
+    } catch (e) {
+      done();
+      reject(e);
+    }
+  });
+}
+function szsRefresh() {
+  if (SHEET.kind === 'szs') refreshSheet(true);
+}
+function szsError(e) {
+  SZED.error = e.message || String(e);
+  szsRefresh();
+  toast(SZED.error, true);
+}
+function openSZSEditor() {
+  openSheet('SZS · Track archive', buildSZSEditor, { panel: true, kind: 'szs' });
+}
+async function loadSZSEditor(bytes, name = 'course.szs') {
+  if (SZED.busy) throw new Error('Wait for the current archive operation');
+  SZED.busy = 'Opening archive…';
+  SZED.error = '';
+  szsRefresh();
+  try {
+    const archive = await szsWorker('inspect', bytes);
+    Object.assign(SZED, {
+      archive,
+      name,
+      selected: archive.nodes.find((n) => !n.directory)?.id ?? null,
+      changes: new Map(),
+      search: '',
+      page: 0,
+      target: null,
+    });
+    return archive;
+  } finally {
+    SZED.busy = '';
+    szsRefresh();
+  }
+}
+function szsStage(id, bytes) {
+  if (SZED.busy) throw new Error('Wait for the current archive operation');
+  const node = SZED.archive?.nodes[id];
+  if (!node || node.directory) throw new Error('Select an archive file');
+  const b = _szsBytes(bytes);
+  if (b.length > SZS_MAX_SIZE) throw new Error('Replacement exceeds 128 MiB');
+  if (/\.brres$/i.test(node.name)) inspectBRRES(b);
+  if (/\.kmp$/i.test(node.name)) inspectKMP(b);
+  if (/\.kcl$/i.test(node.name)) {
+    if (b.length < 60) throw new Error('Not a Wii KCL file');
+    const v = new DataView(b.buffer, b.byteOffset, b.byteLength),
+      offsets = [v.getUint32(0), v.getUint32(4), v.getUint32(8) + 16, v.getUint32(12)];
+    if (offsets[0] < 60 || offsets[3] >= b.length || offsets.some((n, i) => i && n < offsets[i - 1]))
+      throw new Error('Invalid Wii KCL section offsets');
+  }
+  // Check total before retaining the replacement; rebuilding checks alignment as well.
+  let total = Math.ceil(SZED.archive.headerEnd / 32) * 32;
+  for (const n of SZED.archive.nodes)
+    if (!n.directory)
+      total += Math.ceil((n.id === id ? b.length : szsEntryBytes(SZED.archive, n.id, SZED.changes).length) / 32) * 32;
+  if (total > SZS_MAX_SIZE) throw new Error('Updated archive exceeds 128 MiB');
+  SZED.changes.set(id, b.slice());
+  SZED.error = '';
+  szsRefresh();
+}
+function szsProjectFile(name) {
+  if (name === 'course.kcl') return exportKCL(trackTriangles()).bytes;
+  if (name === 'course.kmp')
+    return exportKMP(S.track.start, {
+      scale: S.track.scale,
+      template: S.track.template ? bytesFromB64(S.track.template) : null,
+    });
+  return runExport('brres', {
+    baseName: 'course_model',
+    selectedOnly: false,
+    zip: false,
+    scale: S.track.scale,
+    textureSize: settingsGet('export', {}).textureSize || 512,
+  }).data;
+}
+function szsApplyProject(all = true) {
+  if (!SZED.archive || SZED.busy) throw new Error('Open an archive and wait for it to finish loading');
+  const names = ['course_model.brres', 'course.kcl', 'course.kmp'];
+  const selected = SZED.archive.nodes[SZED.selected];
+  const wanted = all ? names : [selected?.name.toLowerCase()];
+  const edits = [];
+  for (const name of wanted) {
+    if (!names.includes(name)) throw new Error('Choose course_model.brres, course.kcl or course.kmp');
+    const matches = all ? SZED.archive.nodes.filter((n) => !n.directory && n.name.toLowerCase() === name) : [selected];
+    if (matches.length !== 1)
+      throw new Error(
+        matches.length
+          ? 'Multiple ' + name + ' entries: select and replace each explicitly.'
+          : 'Archive is missing ' + name + '. Use a complete Wii track package.',
+      );
+    edits.push([matches[0].id, szsProjectFile(name)]);
+  }
+  // All exports and validation must succeed before committing any replacements.
+  const before = SZED.changes;
+  SZED.changes = new Map(before);
+  try {
+    for (const [id, bytes] of edits) szsStage(id, bytes);
+  } catch (e) {
+    SZED.changes = before;
+    szsRefresh();
+    throw e;
+  }
+  szsRefresh();
+  toast(edits.length + ' course file' + (edits.length === 1 ? '' : 's') + ' replaced. Save SZS to keep them.');
+}
+async function szsSave() {
+  if (!SZED.archive || SZED.busy) return;
+  SZED.busy = 'Packing and compressing SZS…';
+  SZED.error = '';
+  szsRefresh();
+  try {
+    const bytes = await szsWorker('save', { archive: SZED.archive, changes: SZED.changes });
+    // Keep sharing within a fresh tap on iOS, after compression completes.
+    SZED.busy = '';
+    szsRefresh();
+    const name = safeFileName(SZED.name.replace(/\.(szs|u8|arc)$/i, '')) + '_edited.szs';
+    openSheet('SZS ready', (body) =>
+      body.append(
+        h('p', {}, name + ' · ' + brresSize(bytes.length)),
+        trackButton('Save & Send SZS…', () => shareOrDownload(name, bytes), true),
+        trackButton('Back to SZS editor', openSZSEditor),
+      ),
+    );
+  } catch (e) {
+    SZED.busy = '';
+    szsError(e);
+  }
+}
+function szsButton(text, run, primary = false) {
+  const b = trackButton(
+    text,
+    () => {
+      try {
+        run();
+      } catch (e) {
+        szsError(e);
+      }
+    },
+    primary,
+  );
+  Object.assign(b.style, {
+    height: 'auto',
+    minHeight: '38px',
+    whiteSpace: 'normal',
+    textAlign: 'left',
+    width: '100%',
+    overflowWrap: 'anywhere',
+  });
+  b.disabled = !!SZED.busy;
+  return b;
+}
+function buildSZSEditor(body) {
+  body.append(
+    szsButton(
+      SZED.changes.size ? 'Open another SZS… (discards replacements)' : 'Open SZS…',
+      () => $('#fileSZS').click(),
+      true,
+    ),
+  );
+  body.append(
+    h(
+      'p',
+      { class: 'muted' },
+      'Open an existing Mario Kart Wii track archive. Replace files, then save a compressed SZS copy. Archive edits stay in memory and are not included in project autosave.',
+    ),
+  );
+  if (SZED.error) body.append(h('p', { class: 'brres-error', role: 'alert' }, SZED.error));
+  if (SZED.busy) body.append(h('p', { role: 'status' }, SZED.busy));
+  const a = SZED.archive;
+  if (!a) return;
+  body.append(
+    h(
+      'div',
+      { class: 'card' },
+      h('strong', { style: { overflowWrap: 'anywhere' } }, SZED.name),
+      h(
+        'span',
+        {},
+        `${a.compressed ? 'Yaz0 / U8' : 'Uncompressed U8'} · ${brresSize(a.bytes.length)} unpacked · ${a.nodes.filter((n) => !n.directory).length} files`,
+      ),
+      h(
+        'span',
+        { id: 'szsChanges', 'aria-live': 'polite' },
+        `${SZED.changes.size} replacement${SZED.changes.size === 1 ? '' : 's'} staged`,
+      ),
+      szsButton('Prepare SZS download', szsSave, true),
+      szsButton('Use current project course files', () => szsApplyProject(true)),
+      h(
+        'p',
+        { class: 'muted' },
+        'Replaces course_model.brres, course.kcl and course.kmp together, using the shared Wii scale. Other resources, object files and paths are preserved. Their positions may need adjustment for your new track.',
+      ),
+    ),
+  );
+  const search = h('input', {
+      type: 'search',
+      placeholder: 'Search file paths or types…',
+      'aria-label': 'Search archive files',
+      value: SZED.search,
+      disabled: !!SZED.busy,
+    }),
+    list = h('div', { class: 'szs-list', 'aria-label': 'Archive file list' }),
+    paging = h('div', { class: 'row' });
+  const renderList = () => {
+    list.replaceChildren();
+    paging.replaceChildren();
+    const nodes = a.nodes
+      .slice(1)
+      .filter((n) =>
+        (n.path + ' ' + (n.directory ? 'folder' : szsFileType(szsEntryBytes(a, n.id, SZED.changes), n.name)))
+          .toLowerCase()
+          .includes(SZED.search.toLowerCase()),
+      );
+    const pages = Math.max(1, Math.ceil(nodes.length / 100));
+    SZED.page = Math.min(SZED.page, pages - 1);
+    for (const n of nodes.slice(SZED.page * 100, SZED.page * 100 + 100)) {
+      if (n.directory) {
+        list.append(h('div', { class: 'szs-folder' }, '▾ ' + n.path + '/'));
+        continue;
+      }
+      const b = szsEntryBytes(a, n.id, SZED.changes);
+      list.append(
+        h(
+          'button',
+          {
+            class: 'szs-entry' + (n.id === SZED.selected ? ' on' : ''),
+            'aria-label': 'Select archive file ' + n.path,
+            'aria-pressed': String(n.id === SZED.selected),
+            disabled: !!SZED.busy,
+            onclick: () => {
+              SZED.selected = n.id;
+              SZED.error = '';
+              szsRefresh();
+            },
+          },
+          h('strong', {}, n.path),
+          h(
+            'small',
+            {},
+            szsFileType(b, n.name) + ' · ' + brresSize(b.length) + (SZED.changes.has(n.id) ? ' · REPLACED' : ''),
+          ),
+        ),
+      );
+    }
+    if (!nodes.length) list.append(h('p', {}, 'No matching files.'));
+    if (pages > 1) {
+      const prev = szsButton('Previous', () => {
+          SZED.page--;
+          renderList();
+        }),
+        next = szsButton('Next', () => {
+          SZED.page++;
+          renderList();
+        });
+      prev.disabled ||= SZED.page === 0;
+      next.disabled ||= SZED.page === pages - 1;
+      paging.append(prev, h('span', {}, `${SZED.page + 1} / ${pages}`), next);
+    }
+  };
+  search.addEventListener('input', () => {
+    SZED.search = search.value;
+    SZED.page = 0;
+    renderList();
+  });
+  renderList();
+  body.append(search, list, paging);
+  const n = a.nodes[SZED.selected];
+  if (n && !n.directory) {
+    const bytes = szsEntryBytes(a, n.id, SZED.changes),
+      card = h(
+        'div',
+        { class: 'card' },
+        h('h3', { style: { overflowWrap: 'anywhere' } }, n.path),
+        h('span', {}, szsFileType(bytes, n.name) + ' · ' + brresSize(bytes.length)),
+        szsButton(
+          'Replace selected file…',
+          () => {
+            SZED.target = { archive: a, id: n.id };
+            $('#fileSZSReplace').click();
+          },
+          true,
+        ),
+        szsButton('Download selected file', () => shareOrDownload(n.name, bytes)),
+      );
+    if (SZED.changes.has(n.id))
+      card.append(
+        szsButton('Revert selected file', () => {
+          SZED.changes.delete(n.id);
+          SZED.error = '';
+          szsRefresh();
+        }),
+      );
+    if (['course_model.brres', 'course.kcl', 'course.kmp'].includes(n.name.toLowerCase()))
+      card.append(szsButton('Replace with current project ' + n.name, () => szsApplyProject(false)));
+    if (/\.brres$/i.test(n.name)) {
+      card.append(szsButton('Open selected BRRES in texture editor', () => loadBRRESEditor(bytes, n.name)));
+      if (BRED.archive)
+        card.append(
+          szsButton('Replace with BRRES editor: ' + BRED.name, () =>
+            szsStage(n.id, saveBRRESEdits(BRED.archive, BRED.changes)),
+          ),
+        );
+    }
+    body.append(card);
+  }
+  if (SZED.changes.size)
+    body.append(
+      szsButton('Revert all replacements', () => {
+        SZED.changes.clear();
+        SZED.error = '';
+        szsRefresh();
+      }),
+    );
+}
+$('#fileSZS').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    if (file.size > (SZS_MAX_SIZE * 9) / 8 + 16) throw new Error('Archive is too large');
+    await loadSZSEditor(new Uint8Array(await file.arrayBuffer()), file.name);
+    openSZSEditor();
+  } catch (e) {
+    szsError(e);
+  }
+});
+$('#fileSZSReplace').addEventListener('change', async (e) => {
+  const file = e.target.files[0],
+    target = SZED.target || { archive: SZED.archive, id: SZED.selected };
+  e.target.value = '';
+  SZED.target = null;
+  if (!file) return;
+  try {
+    if (file.size > SZS_MAX_SIZE) throw new Error('Replacement exceeds 128 MiB');
+    const bytes = new Uint8Array(await file.arrayBuffer());
+    if (SZED.archive !== target.archive) throw new Error('The archive changed. Select the file again.');
+    szsStage(target.id, bytes);
+    toast('Replaced ' + SZED.archive.nodes[target.id].path);
+  } catch (e) {
+    szsError(e);
+  }
+});
 
 // ==== app_ui.js ====
 // ============================================================================
@@ -10367,10 +11151,10 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  for (const t of (S.workspace === 'model' ? TOOLS3D : S.workspace === 'kcl' ? [['select','select','Pick collision material']] : [['place','cursor','Place Start'],['aim','rotate','Aim Start']])) {
+  for (const t of (S.workspace === 'model' ? TOOLS3D : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
-    const b = h('button', { class: (S.workspace === 'kmp' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { if (S.workspace === 'kmp') { trackAction(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
+    b.addEventListener('click', () => { if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
@@ -10452,7 +11236,7 @@ function buildNavButtons() {
   const pr = h('button', { id: 'btnOrtho', html: icon(CAM.ortho ? 'ortho' : 'persp'), 'aria-label': 'Toggle perspective / orthographic' });
   pr.addEventListener('click', () => toggleOrtho());
   const fr = h('button', { html: icon('frame'), 'aria-label': 'Frame selected' });
-  fr.addEventListener('click', () => frameSelected());
+  fr.addEventListener('click', () => S.workspace === 'kmp' && S.track.start ? trackFocusStart() : frameSelected());
   const xr = h('button', { id: 'btnXray', class: S.xray ? 'on' : '', html: icon('xray'), 'aria-label': 'X-ray: see and select through the mesh' });
   xr.addEventListener('click', () => { S.xray = !S.xray; xr.classList.toggle('on', S.xray); refreshMaterials(); refreshAllObjects(); toast(S.xray ? 'X-ray on' : 'X-ray off'); });
   const sh = h('button', { id: 'btnShade', class: 'shade', html: icon(SHADES.find((x) => x[0] === S.shading)[1]), 'aria-label': 'Viewport shading' });
@@ -10693,6 +11477,7 @@ function menuFile() {
     { group: 'Track workspaces' },
     { label: 'KCL Editor', icon: 'layers', run: () => { setWorkspace('kcl'); openKCL(); } },
     { label: 'KMP Editor', icon: 'cursor', run: () => { setWorkspace('kmp'); openKMP(); } },
+    { label: 'SZS Editor…', icon: 'folder', desc: 'Open a track archive and replace its files', run: openSZSEditor },
     { group: 'Exchange' },
     { label: 'BRRES Editor…', icon: 'folder', desc: 'Inspect resources, preview and resize textures', run: openBRRESEditor },
     { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
@@ -11480,7 +12265,12 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Numpad5') { toggleOrtho(); return; }
     if (e.code === 'NumpadDecimal') { frameSelected(); return; }
   }
-  if (S.workspace !== 'model') { if (k === 'Escape') { TRACKVIEW.action = 'select'; hint(null); } return; }
+  if (S.workspace !== 'model') {
+    if (k === 'Home') { S.workspace === 'kmp' && S.track.start ? trackFocusStart() : frameSelected(); return; }
+    if (k === 'Escape') { trackTool('select'); return; }
+    if (!ctrl && !e.altKey) { const tool = {g:'move',r:'rotate',s:'scale'}[k.toLowerCase()]; if (tool && !(S.workspace === 'kmp' && tool === 'scale')) trackTool(tool); }
+    return;
+  }
   const edit = S.mode === 'edit';
   const lk = k.toLowerCase();
   if (k === 'Tab') { e.preventDefault(); setMode(edit ? 'object' : 'edit'); return; }
@@ -11571,7 +12361,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();
