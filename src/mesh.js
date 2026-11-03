@@ -15,7 +15,7 @@ const vlerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 
 const uvlerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 
 export function newMesh() {
-  return { verts: [], faces: [], looseEdges: [], seams: new Set(), smooth: false };
+  return { verts: [], faces: [], looseEdges: [], seams: new Set(), creases: new Set(), smooth: false };
 }
 export function ekey(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
 export function ekeySplit(k) { const i = k.indexOf('_'); return [+k.slice(0, i), +k.slice(i + 1)]; }
@@ -26,9 +26,13 @@ export function cloneMesh(m) {
     faces: m.faces.map((f) => ({ v: f.v.slice(), uv: f.uv.map((u) => [u[0], u[1]]), mat: f.mat | 0 })),
     looseEdges: m.looseEdges.map((e) => [e[0], e[1]]),
     seams: new Set(m.seams),
+    creases: new Set(m.creases || []),
     smooth: !!m.smooth,
   };
 }
+
+// Edge attributes share the same remapping rules through topology edits.
+function edgeTagSets(m) { return [m.seams, m.creases ||= new Set()]; }
 
 // ---------- topology cache ----------
 export function topo(m) {
@@ -72,7 +76,7 @@ export function cleanEdges(m) {
     if (faceEdges.has(k) || seen.has(k)) return false;
     seen.add(k); return true;
   });
-  for (const k of [...m.seams]) if (!faceEdges.has(k) && !seen.has(k)) m.seams.delete(k);
+  for (const tags of edgeTagSets(m)) for (const k of [...tags]) if (!faceEdges.has(k) && !seen.has(k)) tags.delete(k);
   touch(m);
 }
 
@@ -186,7 +190,7 @@ export function vertexNormals(m) {
 // ---------- primitives (all Z-up, centered at origin, with UVs) ----------
 function _face(v, uv, mat = 0) { return { v, uv, mat }; }
 function _mesh(verts, faces, looseEdges = [], seams = []) {
-  return { verts, faces, looseEdges, seams: new Set(seams), smooth: false };
+  return { verts, faces, looseEdges, seams: new Set(seams), creases: new Set(), smooth: false };
 }
 
 export function primPlane({ size = 2 } = {}) {
@@ -432,9 +436,11 @@ export function removeVerts(m, vset) {
   m.verts = nv;
   for (const f of m.faces) f.v = f.v.map((v) => remap[v]);
   m.looseEdges = m.looseEdges.map((e) => [remap[e[0]], remap[e[1]]]);
-  const seams = new Set();
-  for (const k of m.seams) { const [a, b] = ekeySplit(k); if (remap[a] >= 0 && remap[b] >= 0) seams.add(ekey(remap[a], remap[b])); }
-  m.seams = seams;
+  for (const tags of edgeTagSets(m)) {
+    const next = new Set();
+    for (const k of tags) { const [a, b] = ekeySplit(k); if (remap[a] >= 0 && remap[b] >= 0) next.add(ekey(remap[a], remap[b])); }
+    tags.clear(); for (const k of next) tags.add(k);
+  }
   touch(m);
   return remap;
 }
@@ -477,10 +483,9 @@ export function extrudeRegion(m, sel) {
     }
   }
   // seams inside the region follow the moved faces
-  const seamAdd = [];
-  for (const k of m.seams) if (faceEdgeKeys.has(k)) { const [a, b] = ekeySplit(k); seamAdd.push([a, b]); }
+  const tagAdd = edgeTagSets(m).map((tags) => [tags, [...tags].filter((k) => faceEdgeKeys.has(k)).map(ekeySplit)]);
   for (const fi of F) { const f = m.faces[fi]; f.v = f.v.map(dup); }
-  for (const [a, b] of seamAdd) m.seams.add(ekey(newOf.get(a), newOf.get(b)));
+  for (const [tags, edges] of tagAdd) for (const [a, b] of edges) tags.add(ekey(newOf.get(a), newOf.get(b)));
   // lone edges
   const edgeVerts = new Set();
   for (const k of sel.edges) {
@@ -543,7 +548,7 @@ export function duplicateSel(m, sel) {
   }
   for (const k of sel.edges) if (!faceEdge.has(k)) { const [a, b] = ekeySplit(k); m.looseEdges.push([dup(a), dup(b)]); }
   for (const v of sel.verts) dup(v);
-  for (const k of [...m.seams]) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b) && faceEdge.has(k)) m.seams.add(ekey(map.get(a), map.get(b))); }
+  for (const tags of edgeTagSets(m)) for (const k of [...tags]) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b) && faceEdge.has(k)) tags.add(ekey(map.get(a), map.get(b))); }
   touch(m);
   return { verts: new Set(map.values()) };
 }
@@ -730,7 +735,7 @@ export function loopCut(m, ring, cuts = 1, slide = 0) {
   // split seams
   E.forEach(([s, t], i) => {
     const k = ekey(s, t);
-    if (m.seams.has(k)) { m.seams.delete(k); const chain = [s, ...newV[i], t]; for (let q = 0; q < chain.length - 1; q++) m.seams.add(ekey(chain[q], chain[q + 1])); }
+    for (const tags of edgeTagSets(m)) if (tags.has(k)) { tags.delete(k); const chain = [s, ...newV[i], t]; for (let q = 0; q < chain.length - 1; q++) tags.add(ekey(chain[q], chain[q + 1])); }
   });
   touch(m);
   return { verts: out };
@@ -774,7 +779,7 @@ export function subdivide(m, F) {
       }
     }
   }
-  for (const k of [...m.seams]) if (mid.has(k)) { const [a, b] = ekeySplit(k); const c = mid.get(k); m.seams.delete(k); m.seams.add(ekey(a, c)); m.seams.add(ekey(c, b)); }
+  for (const tags of edgeTagSets(m)) for (const k of [...tags]) if (mid.has(k)) { const [a, b] = ekeySplit(k); const c = mid.get(k); tags.delete(k); tags.add(ekey(a, c)); tags.add(ekey(c, b)); }
   // loose edges that got a midpoint
   m.looseEdges = m.looseEdges.flatMap(([a, b]) => { const k = ekey(a, b); return mid.has(k) ? [[a, mid.get(k)], [mid.get(k), b]] : [[a, b]]; });
   touch(m);
@@ -807,9 +812,11 @@ export function applyVertMap(m, map) {
   }
   m.faces = keep;
   m.looseEdges = m.looseEdges.map(([a, b]) => [tgt(a), tgt(b)]);
-  const seams = new Set();
-  for (const k of m.seams) { const [a, b] = ekeySplit(k); const ta = tgt(a), tb = tgt(b); if (ta !== tb) seams.add(ekey(ta, tb)); }
-  m.seams = seams;
+  for (const tags of edgeTagSets(m)) {
+    const next = new Set();
+    for (const k of tags) { const [a, b] = ekeySplit(k); const ta = tgt(a), tb = tgt(b); if (ta !== tb) next.add(ekey(ta, tb)); }
+    tags.clear(); for (const k of next) tags.add(k);
+  }
   touch(m);
   const rm = new Set(); for (const [v, t] of map) if (v !== t) rm.add(v);
   const remap = removeVerts(m, rm);
@@ -1455,7 +1462,9 @@ export function appendMesh(dst, src, xf /* function(p)->p or null */, matOffsetM
   for (const p of src.verts) dst.verts.push(xf ? xf(p) : p.slice());
   for (const f of src.faces) dst.faces.push(_face(f.v.map((v) => v + off), f.uv.map((u) => u.slice()), matOffsetMap ? matOffsetMap(f.mat) : f.mat));
   for (const [a, b] of src.looseEdges) dst.looseEdges.push([a + off, b + off]);
-  for (const k of src.seams) { const [a, b] = ekeySplit(k); dst.seams.add(ekey(a + off, b + off)); }
+  for (const name of ['seams', 'creases']) { dst[name] ||= new Set();
+    for (const k of (src[name] || [])) { const [a, b] = ekeySplit(k); dst[name].add(ekey(a + off, b + off)); }
+  }
   touch(dst);
   const out = new Set(); for (let i = 0; i < src.verts.length; i++) out.add(off + i);
   return out;
@@ -1469,7 +1478,9 @@ export function extractPart(m, vset) {
   m.faces.forEach((f, fi) => { if (f.v.every((v) => vset.has(v))) { takeF.add(fi); part.faces.push(_face(f.v.map(mp), f.uv.map((u) => u.slice()), f.mat)); } });
   for (const [a, b] of m.looseEdges) if (vset.has(a) && vset.has(b)) part.looseEdges.push([mp(a), mp(b)]);
   for (const v of vset) mp(v);
-  for (const k of m.seams) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b)) part.seams.add(ekey(map.get(a), map.get(b))); }
+  for (const name of ['seams', 'creases']) {
+    for (const k of (m[name] || [])) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b)) part[name].add(ekey(map.get(a), map.get(b))); }
+  }
   part.smooth = m.smooth;
   // remove from source: faces taken, then verts no longer used that are in vset
   m.faces = m.faces.filter((_, fi) => !takeF.has(fi));
@@ -1492,7 +1503,9 @@ export function extractFaces(m, fset) {
     part.faces.push(_face(f.v.map(mp), f.uv.map((u) => u.slice()), f.mat));
     for (let i = 0; i < f.v.length; i++) fe.add(ekey(f.v[i], f.v[(i + 1) % f.v.length]));
   });
-  for (const k of m.seams) if (fe.has(k)) { const [a, b] = ekeySplit(k); part.seams.add(ekey(map.get(a), map.get(b))); }
+  for (const name of ['seams', 'creases']) {
+    for (const k of (m[name] || [])) if (fe.has(k)) { const [a, b] = ekeySplit(k); part[name].add(ekey(map.get(a), map.get(b))); }
+  }
   part.smooth = m.smooth;
   m.faces = m.faces.filter((_, fi) => !fset.has(fi));
   touch(m);

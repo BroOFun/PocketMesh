@@ -419,12 +419,13 @@ function rebuildObject(o) {
 }
 function updateGeomPositions(o, skipOverlays) {
   if (!skipOverlays && S.mode !== 'edit' && o.modifiers.some((m) => m.enabled && m.levels)) { rebuildObject(o); return; }
-  const m = o.renderMesh || o.mesh, P = m.verts, { cornerV, cornerF } = o.rd, geo = o.meshNode.geometry;
+  const m = o.renderMesh || o.mesh, P = m.verts, { cornerV, cornerF, cornerC } = o.rd, geo = o.meshNode.geometry;
   const pos = geo.attributes.position.array, nor = geo.attributes.normal.array;
   for (let i = 0; i < cornerV.length; i++) { const p = P[cornerV[i]]; pos[i * 3] = p[0]; pos[i * 3 + 1] = p[1]; pos[i * 3 + 2] = p[2]; }
   if (m.smooth) {
-    const VN = vertexNormals(m);
-    for (let i = 0; i < cornerV.length; i++) { const n = VN[cornerV[i]]; nor[i * 3] = n[0]; nor[i * 3 + 1] = n[1]; nor[i * 3 + 2] = n[2]; }
+    const CN = m.creases?.size ? _exSmoothCornerNormals(P, m.faces, m.creases) : null;
+    const VN = CN ? null : vertexNormals(m);
+    for (let i = 0; i < cornerV.length; i++) { const n = CN ? CN[cornerF[i]][cornerC[i]] : VN[cornerV[i]]; nor[i * 3] = n[0]; nor[i * 3 + 1] = n[1]; nor[i * 3 + 2] = n[2]; }
   } else {
     const FN = m.faces.map((f) => faceNormal(m, f));
     for (let i = 0; i < cornerV.length; i++) { const n = FN[cornerF[i]]; nor[i * 3] = n[0]; nor[i * 3 + 1] = n[1]; nor[i * 3 + 2] = n[2]; }
@@ -448,6 +449,7 @@ function updateGeomUVs(o, fromRebuild = false) {
 const COL = {
   sel: [1, 0.616, 0.227], active: [1, 1, 1], dark: [0.04, 0.045, 0.055], wire: [0.62, 0.65, 0.71], seam: [1, 0.22, 0.25],
   objSel: [0.93, 0.5, 0.12], objAct: [1, 0.72, 0.33], fdot: [0.06, 0.06, 0.07],
+  crease: [0.92, 0.22, 0.85],
 };
 function setLineGeo(o, key, positions, colors, mat) {
   if (!positions.length) { if (o[key]) o[key].visible = false; return; }
@@ -501,16 +503,17 @@ function refreshOverlays(o) {
       let c = base;
       if (editing) {
         const k = a + '_' + b;
+        if (m.creases?.has(k)) c = COL.crease;
         if (S.selectMode === 'vert') {
           const sa = s.verts.has(a), sb = s.verts.has(b);
           if (sa && sb) c = COL.sel;
-          else if (m.seams.has(k)) c = COL.seam;
+          else if (!m.creases?.has(k) && m.seams.has(k)) c = COL.seam;
           if ((sa || sb) && !(sa && sb)) {
             col.set(sa ? COL.sel : c, i * 6); col.set(sb ? COL.sel : c, i * 6 + 3);
             return;
           }
         } else if (s.edges.has(k)) c = COL.sel;
-        else if (m.seams.has(k)) c = COL.seam;
+        else if (!m.creases?.has(k) && m.seams.has(k)) c = COL.seam;
       }
       col.set(c, i * 6); col.set(c, i * 6 + 3);
     });
@@ -861,7 +864,7 @@ function selectObject(o, op = 'set') {
   if (op === 'set') for (const x of S.objects) x.selected = false;
   if (!o) { if (op === 'set') S.active = S.active; onSelectionChanged(); return; }
   if (op === 'sub') { o.selected = false; if (S.active === o) S.active = S.objects.find((x) => x.selected) || o; }
-  else if (op === 'add' && o.selected && S.active === o) { o.selected = false; }
+  else if (op === 'add' && o.selected) { o.selected = false; if (S.active === o) S.active = S.objects.find((x) => x.selected && x.visible) || o; }
   else { o.selected = true; S.active = o; }
   onSelectionChanged();
 }

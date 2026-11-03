@@ -216,6 +216,38 @@ function _exNormalize(v, fallback) {
   return [v[0] / l, v[1] / l, v[2] / l];
 }
 
+// Area-weighted corner normals, splitting smoothing across marked crease edges.
+// Shared by viewport and all exporters so an applied crease shades consistently.
+function _exSmoothCornerNormals(verts, faces, creases) {
+  const offsets = [], parent = [], edges = new Map();
+  const key = (a, b) => a < b ? a + '_' + b : b + '_' + a;
+  for (const f of faces) {
+    const base = parent.length; offsets.push(base);
+    for (let i = 0; i < f.v.length; i++) parent.push(base + i);
+    for (let i = 0; i < f.v.length; i++) {
+      const j = (i + 1) % f.v.length, a = f.v[i], b = f.v[j], k = key(a, b);
+      if (creases.has(k)) continue;
+      if (!edges.has(k)) edges.set(k, []);
+      edges.get(k).push(a < b ? [base + i, base + j] : [base + j, base + i]);
+    }
+  }
+  const root = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (const pair of edges.values()) if (pair.length === 2) {
+    for (let k = 0; k < 2; k++) parent[root(pair[1][k])] = root(pair[0][k]);
+  }
+  const sums = new Map();
+  faces.forEach((f, fi) => {
+    const n = _exNewell(f.v.map((v) => verts[v]));
+    f.v.forEach((_, i) => {
+      const r = root(offsets[fi] + i), sum = sums.get(r) || [0, 0, 0];
+      for (let k = 0; k < 3; k++) sum[k] += n[k];
+      sums.set(r, sum);
+    });
+  });
+  for (const [r, n] of sums) sums.set(r, _exNormalize(n));
+  return faces.map((f, fi) => f.v.map((_, i) => sums.get(root(offsets[fi] + i))));
+}
+
 // Triangulate a polygon (array of 3D points). Returns [[i,j,k], ...] with local indices,
 // keeping the polygon's winding. Ear clipping on the projection onto the Newell plane.
 function _exTriangulate(pts, normal) {
@@ -441,11 +473,12 @@ function _exPrepare(scene, o) {
       if (smooth) for (const i of f.v) { const a = vnAcc[i]; a[0] += nw[0]; a[1] += nw[1]; a[2] += nw[2]; }
     }
     const vn = smooth ? vnAcc.map((a) => (Math.hypot(a[0], a[1], a[2]) > 1e-20 ? _exNormalize(a, null) : null)) : null;
+    const cn = smooth && mesh.creases?.size ? _exSmoothCornerNormals(pos, faces, mesh.creases) : null;
     // Unique normals / UVs per object (exact values); corners reference them by integer id.
     const normals = [], uvs = [];
     const nMap = new Map(), uvMap = new Map();
     const vnId = smooth ? new Int32Array(nv).fill(-1) : null;
-    for (const f of faces) {
+    for (const [fi, f] of faces.entries()) {
       const len = f.v.length;
       f.n = new Array(len);
       f.nid = new Array(len);
@@ -453,7 +486,10 @@ function _exPrepare(scene, o) {
       let fid = -1;
       for (let k = 0; k < len; k++) {
         const vi = f.v[k];
-        if (smooth && vn[vi]) {
+        if (cn) {
+          f.n[k] = cn[fi][k];
+          f.nid[k] = _exId3(nMap, normals, f.n[k]);
+        } else if (smooth && vn[vi]) {
           f.n[k] = vn[vi];
           if (vnId[vi] < 0) vnId[vi] = _exId3(nMap, normals, vn[vi]);
           f.nid[k] = vnId[vi];

@@ -152,6 +152,18 @@ function buildSubbar() {
     bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
     return;
   }
+  if (S.creaseEdit === S.active?.id && S.mode === 'edit') {
+    bar.prepend(chip('', 'Mark Creases', () => changeSelectedCreases(true)),
+      chip('', 'Remove Creases', () => changeSelectedCreases(false)),
+      chip('', 'Done · Preview', finishCreases, {on: true, aria: 'Done editing creases'}));
+    return;
+  }
+  bar.append(chip('Multiselect', S.multiSelect ? 'Done' : '', () => {
+    S.multiSelect = !S.multiSelect; S.selOp = S.multiSelect ? 'add' : 'set';
+    if (S.multiSelect) { S.tool = 'select'; S.pendingTap = null; buildTools(); gizmoSync(); }
+    hint(S.multiSelect ? 'Multiselect · tap objects or mesh elements to add/remove · Done to finish' : null);
+    buildSubbar();
+  }, { on: S.multiSelect, aria: 'Multiselect' }));
   bar.append(
     chip('Orient', ORIENT.find((x) => x[0] === S.orient)[1], () => menuSheet('Transform Orientation', ORIENT.map(([k, l]) => ({ label: l, icon: k === S.orient ? 'check' : 'dots', desc: { global: 'World X / Y / Z axes', local: "The active object's own axes", normal: 'Aligned to the selection surface (edit mode)', view: 'Aligned to the screen' }[k], run: () => { S.orient = k; settingsSet('orient', k); buildSubbar(); gizmoSync(); } })))),
     chip('Pivot', PIVOT.find((x) => x[0] === S.pivot)[1], () => menuSheet('Pivot Point', PIVOT.map(([k, l]) => ({ label: l, icon: k === S.pivot ? 'check' : 'dots', run: () => { S.pivot = k; settingsSet('pivot', k); buildSubbar(); gizmoSync(); } })))),
@@ -167,7 +179,6 @@ function buildSubbar() {
     b.addEventListener('click', () => { S.selOp = k; S.multiSelect = false; hint(null); buildSubbar(); });
     seg.append(b);
   }
-  if (S.multiSelect) bar.append(chip('Multiselect', 'Done', () => { S.multiSelect = false; S.selOp = 'set'; hint(null); buildSubbar(); }, { on: true }));
   bar.append(seg, h('span', { class: 'vsep' }), chip('', '', () => openSettings(), { icon: 'sliders', aria: 'Settings' }));
 }
 
@@ -601,6 +612,28 @@ function buildOutliner(body) {
   }
 }
 function openModifiers() { openSheet('Modifiers', buildModifiers, { panel: true, kind: 'modifiers' }); }
+function beginCreases(o) {
+  closeSheet();
+  if (S.workspace !== 'model') setWorkspace('model');
+  if (S.view !== '3d') setWorkView('3d');
+  S.active = o; o.selected = true; S.tool = 'select'; S.pendingTap = null;
+  setMode('edit'); setSelectMode('face');
+  o.esel = emptySel(); o.activeFace = -1;
+  S.creaseEdit = o.id; S.multiSelect = true; S.selOp = 'add';
+  buildTools(); buildSubbar(); onSelectionChanged();
+  hint('Select faces → Mark Creases → Done · Preview. All edges of each selected face will be creased.');
+}
+function changeSelectedCreases(mark) {
+  const o = S.active;
+  if (!o || S.mode !== 'edit' || !o.esel.faces.size) { toast('Select one or more faces first', true); return; }
+  const count = markFaceCreases(o.mesh, o.esel.faces, mark);
+  if (count) { rebuildObject(o); pushUndo(mark ? 'Mark Creases' : 'Remove Creases'); onSelectionChanged(); }
+  toast(count ? `${count} edge${count === 1 ? '' : 's'} ${mark ? 'creased' : 'uncreased'}` : 'No crease changes');
+}
+function finishCreases() {
+  S.creaseEdit = null; S.multiSelect = false; S.selOp = 'set'; hint(null);
+  setMode('object'); buildSubbar(); openModifiers();
+}
 function changeModifiers(o, next, label) {
   try {
     evaluateModifiers(o.mesh, next); // Validate the allocation before changing state.
@@ -615,14 +648,22 @@ function buildModifiers(body) {
   const m = o.modifiers[0];
   if (!m) {
     const add = h('button', { class: 'btn primary' }, h('span', { html: icon('plus') }), 'Add Subdivision Surface');
-    add.addEventListener('click', () => changeModifiers(o, [{ type: 'subdivision', levels: 1 }], 'Add Subdivision Surface'));
+    add.addEventListener('click', () => changeModifiers(o, [{ type: 'subdivision', levels: 1, boundary: 'keep-corners' }], 'Add Subdivision Surface'));
     body.append(add);
   } else {
     const change = (key, value) => changeModifiers(o, [{ ...o.modifiers[0], [key]: value }], 'Subdivision Settings');
     const card = h('div', { class: 'card' }, h('h3', {}, 'Subdivision Surface'),
       field('Method', selectInput(m.method, [['catmull-clark', 'Catmull–Clark'], ['simple', 'Simple']], (v) => change('method', v), 'Subdivision method')),
       field('Levels', selectInput(m.levels, [0, 1, 2, 3].map((v) => [v, String(v)]), (v) => change('levels', +v), 'Subdivision levels')),
+      field('Boundary', selectInput(m.boundary, [['smooth', 'Smooth'], ['keep-corners', 'Keep Corners'], ['keep-boundary', 'Keep All Boundary Edges']], (v) => change('boundary', v), 'Subdivision boundary')),
       checkInput('Enabled in Object Mode and exports', m.enabled, (v) => change('enabled', v)));
+    const crease = h('button', { class: 'btn' }, 'Add Creases');
+    crease.addEventListener('click', () => beginCreases(o));
+    const clear = h('button', { class: 'btn', disabled: !o.mesh.creases?.size }, 'Clear All Creases');
+    clear.addEventListener('click', () => { o.mesh.creases.clear(); rebuildObject(o); pushUndo('Clear Creases'); onSelectionChanged(); });
+    card.append(h('p', {class: 'muted'}, 'Keep Corners fixes boundary vertices touching one face. Keep All Boundary Edges preserves the whole outline. Simple subdivision already preserves the shape.'),
+      h('div', {class: 'row'}, crease, clear),
+      h('p', {class: 'muted'}, `${o.mesh.creases?.size || 0} creased edges · Add Creases lets you select faces and mark their edges sharp. Magenta edges show creases in Edit Mode.`));
     const apply = h('button', { class: 'btn primary', disabled: S.mode !== 'object' || !m.enabled }, 'Apply to mesh');
     apply.addEventListener('click', () => {
       try { const mesh = evaluateModifiers(o.mesh, o.modifiers); o.mesh = mesh; o.modifiers = []; o.esel = emptySel(); o.activeFace = -1; S.uvSel.clear(); rebuildObject(o); pushUndo('Apply Subdivision'); onSelectionChanged(); }
@@ -970,6 +1011,7 @@ onSelectionChanged = () => {
   refreshSheet();
 };
 onModeChanged = () => {
+  if (S.creaseEdit && (S.mode !== 'edit' || S.active?.id !== S.creaseEdit || S.workspace !== 'model')) { S.creaseEdit = null; S.multiSelect = false; S.selOp = 'set'; hint(null); }
   buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
   $('#selModes').hidden = S.workspace !== 'model' || S.mode !== 'edit';
@@ -992,14 +1034,14 @@ const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastT
 function cancelHold() { clearTimeout(G.holdTimer); G.holdTimer = null; }
 function beginHold(e, p) {
   cancelHold();
-  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
-  const object = S.active, mode = S.mode, selectMode = S.selectMode;
+  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || !['select', 'move', 'rotate', 'scale'].includes(S.tool)) return;
+  const object = S.active, mode = S.mode, selectMode = S.selectMode, tool = S.tool;
   G.holdTimer = setTimeout(() => {
-    if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+    if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== tool) return;
     const el = S.mode === 'edit' && S.active ? pickElement(p.x, p.y, e.pointerType === 'mouse' ? 14 : 28) : null;
     const ob = S.mode === 'object' ? pickObject(p.x, p.y) : null;
     if (!el && !ob) return;
-    S.selOp = 'add'; S.multiSelect = true;
+    S.selOp = 'add'; S.multiSelect = true; S.tool = 'select'; buildTools();
     if (el) {
       // A hold always adds its target; subsequent taps toggle it.
       const selected = el.type === 'vert' ? object.esel.verts.has(el.i) : el.type === 'edge' ? object.esel.edges.has(el.key) : object.esel.faces.has(el.i);

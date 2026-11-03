@@ -383,3 +383,25 @@ references, rather than a bundled converter:
 - [BrawlCrate MDL0 structures](https://github.com/soopercool101/BrawlCrate/blob/master/BrawlLib/SSBB/Types/MDL0.cs): binary layouts and versions.
 - [noclip BRRES reader](https://github.com/magcius/noclip.website/blob/e47a8cc8a9fe16e83adc0bf19153ff04c666ceca/src/rres/brres.ts): independent compatibility test and GX parsing reference.
 - [Dolphin texture decoder](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/VideoCommon/TextureDecoder_Generic.cpp): Wii tiled pixels, palettes, alpha and CMPR interpolation.
+
+## Creases and boundary control
+
+In **Modifiers → Subdivision Surface**, use **Add Creases** before Apply.
+Select one or more faces, press **Mark Creases**, then **Done · Preview**.
+All edges of each chosen face receive a fully sharp crease. Use **Remove Creases**
+on selected faces or **Clear All Creases** in the modifier panel to undo markings.
+Unselected creased edges are magenta in Edit Mode. Creases persist through project
+save/load, undo, duplication, and common topology operations; they also survive
+Apply and produce split shading normals in exported models. Fractional crease
+weights are not exposed in this basic version.
+
+**Boundary → Keep Corners** fixes boundary vertices touching one face while
+smoothing the rest of the border, following the
+[OpenSubdiv boundary rules](https://opensubdiv.org/docs/subdivision_surfaces.html#boundary-interpolation-rules).
+**Keep All Boundary Edges** preserves the entire open outline, useful for road
+edges. **Smooth** retains the earlier rounded-boundary behavior. Simple subdivision
+already preserves the shape, so its boundary setting has no effect.
+
+In Object Mode, tap **Multiselect** or hold an object to enter multiselect.
+Tap any selected object to remove it, including one that is not active.
+The same selection works in the Scene list and with group transforms.
