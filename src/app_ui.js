@@ -259,11 +259,11 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  const modelTools = S.mode === 'edit' ? [...TOOLS3D.slice(0,4), ['knife', 'knife', 'Knife tool · K'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : TOOLS3D;
+  const modelTools = S.mode === 'edit' ? [...TOOLS3D.slice(0,4), ['knife', 'knife', 'Knife tool · K'], ['inset', 'inset', 'Inset faces · I'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : TOOLS3D;
   for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   if (S.workspace === 'model') col.append(h('hr'), h('button', {
@@ -499,6 +499,7 @@ function menuMesh() {
     { label: 'Extrude Along Normals', icon: 'extrude', run: opExtrudeNormals },
     { label: 'Shrink / Fatten', icon: 'normals', key: 'Alt S', desc: 'Move along vertex normals', run: () => tfStart('shrink') },
     { group: 'Faces' },
+    { label: 'Inset Faces', icon: 'inset', key: 'I', desc: 'Inset selected faces, including n-gons', run: opInset },
     { label: 'Triangulate Faces', icon: 'tri', key: 'Ctrl T', run: opTriangulate },
     { label: 'Tris to Quads', icon: 'subdivide', key: 'Alt J', run: opTrisToQuads },
     { group: 'Normals & Shading' },

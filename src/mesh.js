@@ -554,12 +554,60 @@ export function duplicateSel(m, sel) {
 }
 
 // ---------- INSET ----------
+// First collision of a simple polygon's moving inset boundary. Stop just
+// before collapse instead of allowing a large drag to turn a concave n-gon
+// inside out. Collinear corners (including knife-created vertices) are kept.
+function _insetLimit(points, directions, normal) {
+  const p = _project2D(points, normal), d = _project2D(directions, normal);
+  const sub = (a,b) => [a[0]-b[0], a[1]-b[1]], cross = (a,b) => a[0]*b[1]-a[1]*b[0];
+  let limit = Infinity;
+  const roots = (a,b,c) => {
+    if (Math.abs(a) < 1e-12) return Math.abs(b) < 1e-12 ? [] : [-c/b];
+    const disc = b*b-4*a*c;
+    if (disc < 0) return [];
+    const q = -.5*(b + (b < 0 ? -1 : 1)*Math.sqrt(disc));
+    return q ? [q/a, c/q] : [-b/(2*a)];
+  };
+  for (let j=0; j<p.length; j++) {
+    const k=(j+1)%p.length, e=sub(p[k],p[j]), de=sub(d[k],d[j]);
+    const l2=e[0]*e[0]+e[1]*e[1], shrink=e[0]*de[0]+e[1]*de[1];
+    if (shrink < -1e-12) limit=Math.min(limit, -l2/shrink);
+    for (let i=0; i<p.length; i++) if (i!==j && i!==k) {
+      const v=sub(p[i],p[j]), dv=sub(d[i],d[j]);
+      for (const t of roots(cross(de,dv), cross(de,v)+cross(e,dv), cross(e,v))) {
+        if (!(t>1e-10 && t<limit)) continue;
+        const edge=[e[0]+t*de[0],e[1]+t*de[1]], rel=[v[0]+t*dv[0],v[1]+t*dv[1]];
+        const dot=rel[0]*edge[0]+rel[1]*edge[1], len=edge[0]*edge[0]+edge[1]*edge[1];
+        if (dot>=-1e-10 && dot<=len+1e-10) limit=t;
+      }
+    }
+  }
+  return limit * .999999;
+}
+function _insetUV(m, face, triangles, point) {
+  let best=null, penalty=Infinity;
+  for (const tri of triangles) {
+    const [a,b,c]=tri.map(i=>m.verts[face.v[i]]), u=vsub(b,a), v=vsub(c,a), q=vsub(point,a);
+    const uu=vdot(u,u), uv=vdot(u,v), vv=vdot(v,v), qu=vdot(q,u), qv=vdot(q,v), den=uu*vv-uv*uv;
+    if (Math.abs(den)<1e-20) continue;
+    const y=(vv*qu-uv*qv)/den, z=(uu*qv-uv*qu)/den, weights=[1-y-z,y,z];
+    const cost=weights.reduce((s,w)=>s+Math.max(0,-w),0);
+    if (cost<penalty) { penalty=cost; best=[0,1].map(k=>weights.reduce((s,w,i)=>s+w*face.uv[tri[i]][k],0)); }
+    if (cost<1e-10) break;
+  }
+  return best || face.uv[0].slice();
+}
 export function inset(m, F, thickness, depth = 0, individual = false) {
+  F = new Set([...F].filter(fi => m.faces[fi]));
+  if (!Number.isFinite(thickness) || !Number.isFinite(depth)) return {faces: F, clamped: false};
+  thickness = Math.max(0, thickness);
+  if (!thickness && !depth) return {faces: F, clamped: false};
+  let clamped = false;
   if (individual) {
-    for (const fi of F) _insetRegion(m, new Set([fi]), thickness, depth);
-  } else _insetRegion(m, F, thickness, depth);
+    for (const fi of F) clamped = _insetRegion(m, new Set([fi]), thickness, depth) || clamped;
+  } else clamped = !!_insetRegion(m, F, thickness, depth);
   touch(m);
-  return { faces: new Set(F) };
+  return { faces: new Set(F), clamped };
 }
 function _insetRegion(m, F, thickness, depth) {
   const single = F.size === 1;
@@ -592,45 +640,52 @@ function _insetRegion(m, F, thickness, depth) {
     const acc = vnormal.get(v) || [0, 0, 0];
     vnormal.set(v, vadd(acc, n));
   }
-  const newV = new Map();
+  const newV = new Map(), directions = new Map();
   for (const [v, list] of inw) {
     let d;
     if (list.length === 2) {
       const s = vadd(list[0], list[1]);
       const l = vlen(s);
       if (l < 1e-6) d = list[0];
-      else { d = vscale(s, 1 / l); d = vscale(d, 1 / Math.max(0.2, vdot(d, list[0]))); }
+      else { d = vscale(s, 2 / (l*l)); }
     } else {
       d = vnorm(list.reduce((acc, x) => vadd(acc, x), [0, 0, 0]));
     }
+    directions.set(v, d);
+  }
+  let clamped = false;
+  if (single) {
+    const fi = [...F][0], f = m.faces[fi];
+    const limit = _insetLimit(f.v.map(v=>P[v]), f.v.map(v=>directions.get(v)), fnorm.get(fi));
+    if (thickness > limit) { thickness = limit; clamped = true; }
+  }
+  const flat = new Map();
+  for (const [v, d] of directions) {
     const nn = vnorm(vnormal.get(v) || [0, 0, 1]);
+    flat.set(v, vadd(P[v], vscale(d, thickness)));
     const p = vadd(vadd(P[v], vscale(d, thickness)), vscale(nn, depth));
     newV.set(v, P.length); P.push(p);
   }
-  // interior vertices move by depth
-  if (depth) for (const [v, n] of vnormal) if (!newV.has(v)) { const nn = vnorm(n); P[v] = vadd(P[v], vscale(nn, depth)); }
-  // inner faces: remap boundary verts & shrink uvs towards face uv center
+  // Interpolate UVs on each original face before remapping its corners. This
+  // follows the texture on concave faces instead of pulling toward a centroid
+  // which may lie outside the n-gon. Depth must not shrink the UVs.
   const origUV = new Map();
   for (const fi of F) {
-    const f = m.faces[fi], n = f.v.length;
+    const f = m.faces[fi];
     origUV.set(fi, f.uv.map((u) => u.slice()));
-    const c3 = faceCenter(m, f);
-    const cu = [0, 0]; for (const u of f.uv) { cu[0] += u[0] / n; cu[1] += u[1] / n; }
-    f.v = f.v.map((v, i) => {
-      if (!newV.has(v)) return v;
-      const nvI = newV.get(v);
-      const dOld = vlen(vsub(P[v], c3)), moved = vlen(vsub(P[nvI], P[v]));
-      const t = dOld > 1e-9 ? Math.min(0.95, moved / dOld) : 0;
-      f.uv[i] = uvlerp(f.uv[i], cu, t);
-      return nvI;
-    });
+    const triangles = triangulateFace(m, f);
+    const uv = f.v.map((v,i) => newV.has(v) ? _insetUV(m, f, triangles, flat.get(v)) : f.uv[i].slice());
+    f.v = f.v.map(v => newV.get(v) ?? v); f.uv = uv;
   }
+  // Move interior vertices only after sampling UVs on the original surface.
+  if (depth) for (const [v, n] of vnormal) if (!newV.has(v)) P[v] = vadd(P[v], vscale(vnorm(n), depth));
   for (const e of bnd) {
     const f = m.faces[e.fi], n = f.v.length, ou = origUV.get(e.fi);
     const j = (e.i + 1) % n;
     m.faces.push(_face([e.a, e.b, newV.get(e.b), newV.get(e.a)], [ou[e.i].slice(), ou[j].slice(), f.uv[j].slice(), f.uv[e.i].slice()], f.mat));
   }
   touch(m);
+  return clamped;
 }
 
 // ---------- EDGE RING / LOOP CUT ----------
