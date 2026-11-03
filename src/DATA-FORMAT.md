@@ -79,3 +79,16 @@ modifier per object. `mesh` always remains the editable control mesh until Apply
 `renderMesh` is transient evaluated geometry, never serialized. The app evaluates
 modifiers before constructing an export scene. UVs use face-varying bilinear
 interpolation so island seams are not welded. See `TRACK-AUTHORING.md` for limits.
+
+
+## Ruler project state
+
+The optional `ruler` project/snapshot field contains `metersPerUnit` (positive,
+default 1), `unit` (`m`, `cm`, `mm`, or `ft`, default `m`), `snap` (default true),
+and `measurements`: up to 200 `{a: [x,y,z], b: [x,y,z]}` world-coordinate endpoint
+pairs. Endpoints are snapshots rather than mesh references. Old projects without
+this field load with an empty meter-based ruler. These settings do not change
+mesh coordinates or the separate export scale.
+
+BRRES editor archives and texture edits are separate transient state and are not
+serialized in modeling projects. Save them with the editor’s BRRES download.

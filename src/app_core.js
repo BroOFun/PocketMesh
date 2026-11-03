@@ -29,6 +29,7 @@ function h(tag, attrs = {}, ...kids) {
 
 // ---------- icons ----------
 const ICONS = {
+  ruler: '<path d="m3 16 13-13 5 5L8 21zM7 12l2 2m2-6 2 2m2-6 2 2"/>',
   menu: '<path d="M4 6.5h16M4 12h16M4 17.5h16"/>',
   undo: '<path d="M9 13.5 4.5 9 9 4.5"/><path d="M4.5 9H14a5.5 5.5 0 0 1 0 11h-3"/>',
   redo: '<path d="M15 13.5 19.5 9 15 4.5"/><path d="M19.5 9H10a5.5 5.5 0 0 0 0 11h3"/>',
@@ -110,7 +111,7 @@ const S = {
   snap: false, snapMove: 0.1, snapRot: 5, snapScale: 0.1,
   prop: false, propRadius: 1, propFalloff: 'smooth',
   shading: 'solid', xray: false, faceOrient: false, view: '3d',
-  cursor: new THREE.Vector3(),
+  cursor: new THREE.Vector3(), ruler: normalizeRuler(),
   uvSel: new Set(), uvTool: 'select', uvStretch: false,
 };
 let _nid = 1, _matNid = 1, _imgNid = 1;
@@ -355,7 +356,7 @@ function rebuildObject(o) {
       o.modifierError = e.message;
     }
   }
-  o.renderMesh = m;
+  o.renderMesh = m; o.rulerEdges = null;
   const nSlots = Math.max(1, o.materials.length);
   const lists = Array.from({ length: nSlots }, () => []);
   for (let fi = 0; fi < m.faces.length; fi++) {
@@ -857,7 +858,7 @@ function snapshot() {
     })),
     materials: S.materials.map((m) => ({ ...m })),
     active: S.active ? S.active.id : null, mode: S.mode, selectMode: S.selectMode,
-    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel),
+    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel), ruler: normalizeRuler(S.ruler),
   };
 }
 function restore(snap) {
@@ -885,6 +886,7 @@ function restore(snap) {
   S.mode = snap.mode === 'edit' && S.active ? 'edit' : 'object';
   S.selectMode = snap.selectMode;
   S.cursor.fromArray(snap.cursor);
+  S.ruler = normalizeRuler(snap.ruler); rulerResetPending();
   S.uvSel = new Set(snap.uvSel);
   for (const o of S.objects) rebuildObject(o);
   refreshOriginDots();
@@ -959,4 +961,5 @@ function frame(now) {
   dirty = false;
   renderer.render(scene, camera);
   drawNav();
+  drawRuler();
 }

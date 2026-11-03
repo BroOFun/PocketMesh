@@ -147,6 +147,10 @@ function buildSubbar() {
     b.addEventListener('click', run);
     return b;
   };
+  if (S.tool === 'ruler') {
+    bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
+    return;
+  }
   bar.append(
     chip('Orient', ORIENT.find((x) => x[0] === S.orient)[1], () => menuSheet('Transform Orientation', ORIENT.map(([k, l]) => ({ label: l, icon: k === S.orient ? 'check' : 'dots', desc: { global: 'World X / Y / Z axes', local: "The active object's own axes", normal: 'Aligned to the selection surface (edit mode)', view: 'Aligned to the screen' }[k], run: () => { S.orient = k; settingsSet('orient', k); buildSubbar(); gizmoSync(); } })))),
     chip('Pivot', PIVOT.find((x) => x[0] === S.pivot)[1], () => menuSheet('Pivot Point', PIVOT.map(([k, l]) => ({ label: l, icon: k === S.pivot ? 'check' : 'dots', run: () => { S.pivot = k; settingsSet('pivot', k); buildSubbar(); gizmoSync(); } })))),
@@ -167,13 +171,13 @@ function buildSubbar() {
 }
 
 // ---------- tool columns ----------
-const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
+const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
   for (const t of TOOLS3D) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: S.tool === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { S.tool = t[0]; S.pendingTap = null; hint(null); buildTools(); gizmoSync(); });
+    b.addEventListener('click', () => { if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
@@ -324,7 +328,7 @@ function buildShelf() {
       shelfBtn('Shading', 'smooth', () => menuSheet('Shading', [{ label: 'Shade Smooth', icon: 'smooth', run: () => opNormals('smooth') }, { label: 'Shade Flat', icon: 'cube', run: () => opNormals('flat') }, { group: 'Normals' }, { label: 'Recalculate Outside', icon: 'normals', run: () => opNormals('outside') }, { label: 'Flip Normals', icon: 'normals', run: () => opNormals('flip') }]), true),
       shelfBtn('Origin', 'origin', menuOrigin, true), shelfBtn('Apply', 'check', menuApply, true), shelfBtn('Mirror', 'mirror', menuMirror, true), shelfBtn('Snap', 'magnet', menuSnap, true),
       shelfBtn('Hide', 'hide', () => menuSheet('Visibility', [{ label: 'Hide Selected', icon: 'eyeoff', key: 'H', run: () => opHide('hide') }, { label: 'Reveal Hidden', icon: 'eye', key: 'Alt H', run: () => opHide('reveal') }]), true), g(),
-      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
+      shelfBtn('Ruler', 'ruler', openRuler), shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
     );
   } else {
     sh.append(
@@ -335,7 +339,7 @@ function buildShelf() {
       shelfBtn('Mesh', 'cube', menuMesh, true), g(),
       shelfBtn('UV', 'uv', menuUVFrom3D, true), shelfBtn('Seams', 'seam', () => menuSheet('UV Seams', [{ label: 'Mark Seam', icon: 'seam', desc: 'Selected edges become cuts for Unwrap', run: () => opSeam(true) }, { label: 'Clear Seam', icon: 'seam', run: () => opSeam(false) }]), true),
       shelfBtn('Snap', 'magnet', menuSnap, true), shelfBtn('Mirror', 'mirror', menuMirror, true), g(),
-      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
+      shelfBtn('Ruler', 'ruler', openRuler), shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
     );
   }
   if (S.view === 'split') sh.append(g(), shelfBtn('UV Shelf', 'uv', () => { S.focus = 'uv'; buildShelf(); }));
@@ -493,6 +497,7 @@ function menuFile() {
     { label: 'Open Project…', icon: 'folder', desc: 'A .pocketmesh.json file', run: () => $('#fileProj').click() },
     { label: 'Save Project', icon: 'save', desc: 'Save to Files, iCloud Drive, AirDrop…', run: saveProjectFile },
     { group: 'Exchange' },
+    { label: 'BRRES Editor…', icon: 'folder', desc: 'Inspect resources, preview and resize textures', run: openBRRESEditor },
     { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
     { label: 'Export as BRRES…', icon: 'export', desc: 'Wii model and textures', run: () => { settingsSet('export', { ...settingsGet('export', {}), fmt: 'brres', zip: false }); openExport(); } },
     { label: 'Import OBJ + materials…', desc: 'Select OBJ, MTL and images together', icon: 'import', run: () => $('#fileObj').click() },
@@ -518,7 +523,7 @@ function newScene() {
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
   S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
-  S.cursor.set(0, 0, 0);
+  S.cursor.set(0, 0, 0); S.ruler = normalizeRuler(); rulerResetPending();
   const mat = newMaterial('Material', '#c9ccd2');
   const o = createObject('Cube', primCube(), { materials: [mat.id] });
   o.selected = true; S.active = o;
@@ -949,6 +954,7 @@ onSelectionChanged = () => {
   refreshSheet();
 };
 onModeChanged = () => {
+  buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
   $('#selModes').hidden = S.mode !== 'edit';
   for (const b of document.querySelectorAll('#selModes button')) b.classList.toggle('on', b.dataset.sm === S.selectMode);
@@ -961,7 +967,7 @@ onHistoryChanged = () => {
   if (LAST.op && LAST.op.idx !== UNDO.idx) { LAST.op = null; hideRedoPanel(); }
   scheduleAutosave();
 };
-afterRestore = () => { onModeChanged(); onSelectionChanged(); };
+afterRestore = () => { onModeChanged(); onSelectionChanged(); buildSubbar(); };
 const _origSetSelectMode = setSelectMode;
 setSelectMode = function (m) { _origSetSelectMode(m); onModeChanged(); };
 
@@ -1017,6 +1023,7 @@ c3d.addEventListener('pointerdown', (e) => {
 c3d.addEventListener('pointermove', (e) => {
   const p = rel(e);
   if (!G.p.has(e.pointerId)) {
+    if (S.tool === 'ruler' && G.p.size === 0 && !TF.active && !PM.active) { RULER.hover = rulerPick(p.x,p.y,18); requestRender(); }
     // desktop: modal transforms follow the hovering mouse like Blender
     if (e.pointerType === 'mouse' && TF.active && G.p.size === 0) {
       if (G.hover) tfDrag(p.x - G.hover.x, p.y - G.hover.y);
@@ -1029,7 +1036,7 @@ c3d.addEventListener('pointermove', (e) => {
   const dx = p.x - pt.x, dy = p.y - pt.y;
   pt.x = p.x; pt.y = p.y;
   if (Math.hypot(p.x - pt.x0, p.y - pt.y0) > (e.pointerType === 'mouse' ? 4 : 9)) G.moved = true;
-  if (G.moved) cancelHold();
+  if (G.moved) { cancelHold(); if (S.tool === 'ruler') RULER.hover = null; }
   if (G.mode === 'two' && G.p.size === 2) {
     const t = twoInfo();
     let dth = Math.atan2(Math.sin(t.ang - G.two.ang), Math.cos(t.ang - G.two.ang));
@@ -1101,6 +1108,7 @@ function handleTap(x, y, ptype) {
   const radius = ptype === 'mouse' ? 14 : 28;
   if (S.pendingTap === 'loopcut') { loopCutAt(x, y); return; }
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
+  if (S.tool === 'ruler') { rulerTap(x,y,radius); return; }
   if (S.tool === 'cursor') { placeCursor(x, y); return; }
   const now = performance.now();
   const dbl = !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
@@ -1311,7 +1319,7 @@ document.addEventListener('keydown', (e) => {
     case 'p': if (edit) opSeparate('selected'); break;
     case 'n': openProps(); break;
     case 'h': if (!edit) opHide('hide'); break;
-    case 'escape': S.pendingTap = null; hint(null); break;
+    case 'escape': S.pendingTap = null; if (S.tool === 'ruler') { if (RULER.first) rulerResetPending(); else rulerDone(); } hint(null); break;
   }
 });
 
@@ -1358,7 +1366,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { S, CAM, UNDO, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();
