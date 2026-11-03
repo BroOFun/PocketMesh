@@ -89,3 +89,8 @@ Track tools are grouped under **Track Editor → Course Model / KCL / KMP / SZS*
 Wii scene exports share a 100× default scale while the editor remains at modeling
 size. In Edit Mode, **Extrude** offers **Tap extrude**, **Rotate to tap**, and
 **Rotate source** controls; tap extrusion and tap rotation default off.
+
+In split view, tapping a pane or its toolbar switches the shelf and controls to
+that editor. UV tools have their own multiselect, G/R/S drag-tool shortcuts,
+Home to fit, and visible operation settings. **3D View** returns from full-screen
+UV. The 3D cursor uses a small, thin red-and-white ring with short crosshairs.

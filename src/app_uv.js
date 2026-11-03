@@ -189,6 +189,7 @@ function uvTap(x, y, op) {
   uvRequest();
 }
 function uvBoxSelect(b, op) {
+  if (!S.active) return;
   const m = S.active.mesh, faces = uvFaces(), keys = [];
   const xa = Math.min(b.x0, b.x1), xb = Math.max(b.x0, b.x1), ya = Math.min(b.y0, b.y1), yb = Math.max(b.y0, b.y1);
   for (const fi of faces) m.faces[fi].uv.forEach((u, c) => { const [px, py] = u2s(u[0], u[1]); if (px >= xa && px <= xb && py >= ya && py <= yb) keys.push(CK(fi, c)); });
@@ -360,7 +361,8 @@ function uvDragMove(x, y) {
   const px = tex ? 1 / Math.max(tex.img.width, 1) : 1 / 64;
   let fn;
   if (S.uvTool === 'move') {
-    let du = (x - UVD.x0) / UV.scale, dv = -(y - UVD.y0) / UV.scale;
+    const a = s2u(UVD.x0, UVD.y0), b = s2u(x, y);
+    let du = b[0] - a[0], dv = b[1] - a[1];
     if (S.snap) { du = snapTo(du, px); dv = snapTo(dv, px); }
     fn = (u) => [u[0] + du, u[1] + dv];
   } else if (S.uvTool === 'rotate') {
@@ -385,6 +387,13 @@ function uvDragEnd() {
   if (!UVD) return;
   UVD = null;
   pushUndo('UV ' + { move: 'Move', rotate: 'Rotate', scale: 'Scale' }[S.uvTool]);
+}
+function uvDragCancel() {
+  if (!UVD) return;
+  const {corners, start, m} = UVD;
+  corners.forEach((k, i) => { m.faces[ckF(k)].uv[ckC(k)] = start[i]; });
+  UVD = null;
+  uvRefresh();
 }
 
 // ---------- UV layout image ----------

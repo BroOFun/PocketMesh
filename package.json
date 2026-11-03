@@ -16,7 +16,8 @@
     "test:szs:browser": "node test/szs-browser.cjs",
     "test:backfaces:browser": "node test/backfaces-browser.cjs",
     "test:creases:browser": "node test/creases-browser.cjs",
-    "test:track-editor:browser": "node test/track-editor-browser.cjs"
+    "test:track-editor:browser": "node test/track-editor-browser.cjs",
+    "test:uv-controls:browser": "node test/uv-controls-browser.cjs"
   },
   "license": "UNLICENSED",
   "dependencies": {
