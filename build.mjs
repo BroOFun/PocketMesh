@@ -5,7 +5,7 @@ import crypto from 'crypto';
 const root = path.dirname(new URL(import.meta.url).pathname);
 const src = (f) => path.join(root, 'src', f);
 const dist = path.join(root, 'docs');
-const ORDER = ['mesh.js', 'uv.js', 'export.js', 'app_core.js', 'app_transform.js', 'app_ops.js', 'app_uv.js', 'app_io.js', 'app_ui.js'];
+const ORDER = ['mesh.js', 'modifiers.js', 'materials.js', 'uv.js', 'export.js', 'brres.js', 'app_core.js', 'app_transform.js', 'app_ops.js', 'app_uv.js', 'app_io.js', 'app_ui.js'];
 const imports = new Set();
 let code = '';
 for (const f of ORDER) {

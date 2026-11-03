@@ -107,7 +107,7 @@ function opDuplicate() {
     for (const x of S.objects) x.selected = false;
     let act = null;
     for (const o of objs) {
-      const c = createObject(o.name, cloneMesh(o.mesh), { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials });
+      const c = createObject(o.name, cloneMesh(o.mesh), { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials, modifiers: o.modifiers });
       c.selected = true;
       if (o === S.active || !act) act = c;
     }
@@ -517,7 +517,7 @@ function separateByMaterial(o) {
     const part = extractFaces(o.mesh, fs);
     for (const f of part.faces) f.mat = 0;
     const mid = o.materials[slot], mt = matById(mid);
-    const c = createObject(mt ? `${o.name}.${mt.name}` : o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: mid !== undefined ? [mid] : [] });
+    const c = createObject(mt ? `${o.name}.${mt.name}` : o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: mid !== undefined ? [mid] : [], modifiers: o.modifiers });
     c.selected = false; made++;
   }
   const keep = o.materials[used[0]];
@@ -536,7 +536,7 @@ function separateLoose(o) {
   for (const want of sets) {
     const vs = new Set(); o.mesh.verts.forEach((p, i) => { if (want.has(key(p))) vs.add(i); });
     const part = extractPart(o.mesh, vs);
-    const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials });
+    const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials, modifiers: o.modifiers });
     c.selected = false;
   }
   o.esel = emptySel();
@@ -565,7 +565,7 @@ function opSeparate(kind) {
     if (kind === 'selected') {
       const part = extractPart(o.mesh, new Set(o.esel.verts));
       o.esel = emptySel(); rebuildObject(o);
-      const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials });
+      const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials, modifiers: o.modifiers });
       c.selected = false; n = 1;
     } else n = kind === 'material' ? separateByMaterial(o) : separateLoose(o);
     if (!n) { toast(kind === 'material' ? 'This mesh uses only one material' : 'Mesh is already one piece', true); return false; }
@@ -590,6 +590,7 @@ function setMode(mode) {
     S.active.selected = true;
   }
   S.mode = mode;
+  for (const o of S.objects) rebuildObject(o);
   S.pendingTap = null; hint(null);
   if (S.active) flushSel();
   pushUndo(mode === 'edit' ? 'Edit Mode' : 'Object Mode');

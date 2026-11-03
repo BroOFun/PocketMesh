@@ -4,3 +4,5 @@ test/out-export/
 
 *.log
 .DS_Store
+
+work/

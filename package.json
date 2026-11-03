@@ -8,11 +8,17 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/mesh.test.mjs && node test/uv.test.mjs"
+    "test": "node test/mesh.test.mjs && node test/uv.test.mjs && node test/track.test.mjs",
+    "test:track:browser": "node test/track-browser.cjs"
   },
   "license": "UNLICENSED",
   "dependencies": {
     "three": "0.160.0"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "gl-matrix": "3.4.4",
+    "playwright": "1.64.1"
+  }
 }

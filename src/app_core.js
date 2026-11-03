@@ -60,6 +60,7 @@ const ICONS = {
   eyeoff: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" stroke-opacity=".35"/><path d="M4 20 20 4"/>',
   layers: '<path d="M12 3 3 8l9 5 9-5z"/><path d="M3 12.5l9 5 9-5M3 17l9 5 9-5" stroke-opacity=".6"/>',
   sliders: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="15" r="2.2" style="fill:var(--chrome)"/><circle cx="12" cy="8" r="2.2" style="fill:var(--chrome)"/><circle cx="19" cy="13" r="2.2" style="fill:var(--chrome)"/>',
+  modifiers: '<path d="M14 4a5 5 0 0 0-6 6L3 15a3 3 0 0 0 4 4l5-5a5 5 0 0 0 6-6l-3 3-3-3z"/>',
   material: '<circle cx="12" cy="12" r="8.5"/><path d="M4.2 14.5c4 1.6 11.6 1.6 15.6 0" stroke-opacity=".55"/><circle cx="9" cy="9" r="2" fill="currentColor"/>',
   export: '<path d="M12 15V3.5M7.5 8 12 3.5 16.5 8"/><path d="M4.5 13v6.5h15V13"/>',
   import: '<path d="M12 3.5V15M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 13v6.5h15V13"/>',
@@ -230,7 +231,7 @@ tc.visible = false; tc.enabled = false;
 scene.add(tc);
 
 // ---------- materials ----------
-const DEFAULT_MAT = { id: 0, name: 'Default', color: '#c9ccd2', roughness: 0.55, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat' };
+const DEFAULT_MAT = { id: 0, name: 'Default', color: '#c9ccd2', roughness: 0.55, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
 const threeMatCache = new Map();
 const faceOrientMat = new THREE.ShaderMaterial({
   vertexShader: 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
@@ -239,7 +240,7 @@ const faceOrientMat = new THREE.ShaderMaterial({
 });
 function matById(id) { return S.materials.find((m) => m.id === id) || null; }
 function newMaterial(name = 'Material', color = '#c9ccd2') {
-  const m = { id: _matNid++, name: uniqueMatName(name), color, roughness: 0.5, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat' };
+  const m = { id: _matNid++, name: uniqueMatName(name), color, roughness: 0.5, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
   S.materials.push(m);
   return m;
 }
@@ -251,28 +252,27 @@ function uniqueMatName(base) {
 function threeTexFor(imgId, filter, wrap) {
   const img = S.images.get(imgId);
   if (!img) return null;
-  if (!img.tex) {
-    img.tex = new THREE.Texture(img.el);
-    img.tex.colorSpace = THREE.SRGBColorSpace;
-    img.tex.wrapS = img.tex.wrapT = THREE.RepeatWrapping;
-    img.tex.anisotropy = 4;
-    img.tex.needsUpdate = true;
+  // Sampler state belongs to a material, not to the shared source image.
+  const near = filter === 'nearest', extend = wrap === 'extend';
+  const key = `${near}:${extend}`;
+  if (!img.textures) img.textures = new Map();
+  if (!img.textures.has(key)) {
+    const tex = new THREE.Texture(img.el);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = extend ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+    tex.magFilter = near ? THREE.NearestFilter : THREE.LinearFilter;
+    tex.minFilter = near ? THREE.NearestMipmapNearestFilter : THREE.LinearMipmapLinearFilter;
+    tex.anisotropy = near ? 1 : 4;
+    tex.needsUpdate = true;
+    img.textures.set(key, tex);
   }
-  const near = filter === 'nearest';
-  const wrapMode = wrap === 'extend' ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
-  if (img.tex.wrapS !== wrapMode) { img.tex.wrapS = img.tex.wrapT = wrapMode; img.tex.needsUpdate = true; }
-  if (img.tex.magFilter !== (near ? THREE.NearestFilter : THREE.LinearFilter)) {
-    img.tex.magFilter = near ? THREE.NearestFilter : THREE.LinearFilter;
-    img.tex.minFilter = near ? THREE.NearestMipmapNearestFilter : THREE.LinearMipmapLinearFilter;
-    img.tex.needsUpdate = true;
-  }
-  return img.tex;
+  return img.textures.get(key);
 }
 function threeMat(mat) {
   let e = threeMatCache.get(mat.id);
   if (!e) {
     const base = { side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
-    e = { solid: new THREE.MeshStandardMaterial({ ...base }), pbr: new THREE.MeshStandardMaterial({ ...base }) };
+    e = { solid: new THREE.MeshStandardMaterial({ ...base }), pbr: new THREE.MeshStandardMaterial({ ...base }), unlit: new THREE.MeshBasicMaterial({ ...base }) };
     threeMatCache.set(mat.id, e);
   }
   const xray = S.xray;
@@ -280,15 +280,19 @@ function threeMat(mat) {
   const base = tex && !mat.tint ? '#ffffff' : mat.color;
   e.solid.color.set(base);
   e.solid.roughness = 0.62; e.solid.metalness = 0;
-  e.pbr.color.set(base);
+  e.pbr.color.set(base); e.unlit.color.set(base); e.unlit.toneMapped = false;
   e.pbr.roughness = mat.roughness; e.pbr.metalness = mat.metalness;
-  for (const m of [e.solid, e.pbr]) if (m.map !== tex) { m.map = tex; m.needsUpdate = true; }
-  for (const m of [e.solid, e.pbr]) {
-    const a = m === e.pbr ? mat.alpha : 1;
-    const transparent = xray || a < 1;
+  for (const m of [e.solid, e.pbr, e.unlit]) if (m.map !== tex) { m.map = tex; m.needsUpdate = true; }
+  for (const m of [e.solid, e.pbr, e.unlit]) {
+    const a = mat.alphaMode === 'opaque' ? 1 : mat.alpha;
+    const transparent = xray || mat.alphaMode === 'blend' || (mat.alphaMode !== 'cutout' && mat.alphaMode !== 'opaque' && a < 1);
+    const cutoff = mat.alphaMode === 'cutout' ? (mat.alphaCutoff ?? 0.5) : 0;
+    if (m.alphaTest !== cutoff) { m.alphaTest = cutoff; m.needsUpdate = true; }
+    const side = mat.doubleSided !== false ? THREE.DoubleSide : THREE.FrontSide;
+    if (m.side !== side) { m.side = side; m.needsUpdate = true; }
     if (m.transparent !== transparent) { m.transparent = transparent; m.needsUpdate = true; }
     m.opacity = xray ? 0.32 * a : a;
-    m.depthWrite = !xray && a >= 1;
+    m.depthWrite = !transparent;
   }
   return e;
 }
@@ -298,7 +302,7 @@ function objMaterials(o) {
   return slots.map((id) => {
     const mat = matById(id) || DEFAULT_MAT;
     const e = threeMat(mat);
-    return S.shading === 'material' || S.shading === 'rendered' ? e.pbr : e.solid;
+    return mat.shader === 'unlit' ? e.unlit : S.shading === 'material' || S.shading === 'rendered' ? e.pbr : e.solid;
   });
 }
 function refreshMaterials() {
@@ -312,8 +316,8 @@ function uniqueObjName(base) {
   while (S.objects.some((o) => o.name === n)) n = `${base}.${String(i++).padStart(3, '0')}`;
   return n;
 }
-function createObject(name, mesh, { pos, quat, scl, materials, id, keepName } = {}) {
-  const o = { id: id || _nid++, name: keepName ? name : uniqueObjName(name), mesh, materials: materials ? materials.slice() : [], visible: true, selected: false, esel: emptySel(), activeFace: -1 };
+function createObject(name, mesh, { pos, quat, scl, materials, id, keepName, modifiers } = {}) {
+  const o = { id: id || _nid++, name: keepName ? name : uniqueObjName(name), mesh, modifiers: normalizeModifiers(modifiers), materials: materials ? materials.slice() : [], visible: true, selected: false, esel: emptySel(), activeFace: -1 };
   if (id && id >= _nid) _nid = id + 1;
   o.node = new THREE.Group();
   o.node.userData.obj = o;
@@ -342,7 +346,16 @@ function removeObject(o) {
 
 // ---------- render data ----------
 function rebuildObject(o) {
-  const m = o.mesh;
+  let m = o.mesh;
+  if (!(S.mode === 'edit' && o === S.active)) {
+    try { m = evaluateModifiers(o.mesh, o.modifiers); o.modifierError = null; }
+    catch (e) {
+      // Edits can increase the control mesh beyond the preview budget. Keep it editable.
+      if (o.modifierError !== e.message) toast(o.name + ': ' + e.message, true);
+      o.modifierError = e.message;
+    }
+  }
+  o.renderMesh = m;
   const nSlots = Math.max(1, o.materials.length);
   const lists = Array.from({ length: nSlots }, () => []);
   for (let fi = 0; fi < m.faces.length; fi++) {
@@ -373,14 +386,15 @@ function rebuildObject(o) {
   o.meshNode.geometry = geo;
   o.rd = { cornerV, cornerF, cornerC, triFace };
   updateGeomPositions(o, true);
-  updateGeomUVs(o);
+  updateGeomUVs(o, true);
   o.meshNode.material = objMaterials(o);
   o.node.visible = o.visible;
   refreshOverlays(o);
   requestRender();
 }
 function updateGeomPositions(o, skipOverlays) {
-  const m = o.mesh, P = m.verts, { cornerV, cornerF } = o.rd, geo = o.meshNode.geometry;
+  if (!skipOverlays && S.mode !== 'edit' && o.modifiers.some((m) => m.enabled && m.levels)) { rebuildObject(o); return; }
+  const m = o.renderMesh || o.mesh, P = m.verts, { cornerV, cornerF } = o.rd, geo = o.meshNode.geometry;
   const pos = geo.attributes.position.array, nor = geo.attributes.normal.array;
   for (let i = 0; i < cornerV.length; i++) { const p = P[cornerV[i]]; pos[i * 3] = p[0]; pos[i * 3 + 1] = p[1]; pos[i * 3 + 2] = p[2]; }
   if (m.smooth) {
@@ -396,8 +410,9 @@ function updateGeomPositions(o, skipOverlays) {
   if (!skipOverlays) refreshOverlays(o);
   requestRender();
 }
-function updateGeomUVs(o) {
-  const m = o.mesh, { cornerF, cornerC } = o.rd, geo = o.meshNode.geometry;
+function updateGeomUVs(o, fromRebuild = false) {
+  if (!fromRebuild && S.mode !== 'edit' && o.modifiers.some((m) => m.enabled && m.levels)) { rebuildObject(o); return; }
+  const m = o.renderMesh || o.mesh, { cornerF, cornerC } = o.rd, geo = o.meshNode.geometry;
   const uv = geo.attributes.uv.array;
   for (let i = 0; i < cornerF.length; i++) { const u = m.faces[cornerF[i]].uv[cornerC[i]] || [0, 0]; uv[i * 2] = u[0]; uv[i * 2 + 1] = u[1]; }
   geo.attributes.uv.needsUpdate = true;
@@ -441,7 +456,7 @@ function setPointsGeo(o, key, positions, colors, size, onTop) {
   ov.visible = true;
 }
 function refreshOverlays(o) {
-  const m = o.mesh, P = m.verts;
+  const m = o.renderMesh || o.mesh, P = m.verts;
   const editing = S.mode === 'edit' && o === S.active;
   const wire = S.shading === 'wire';
   const seeThrough = S.xray || wire;
@@ -837,7 +852,7 @@ function snapshot() {
   return {
     objects: S.objects.map((o) => ({
       id: o.id, name: o.name, mesh: cloneMesh(o.mesh), pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(),
-      materials: o.materials.slice(), visible: o.visible, selected: o.selected,
+      modifiers: normalizeModifiers(o.modifiers), materials: o.materials.slice(), visible: o.visible, selected: o.selected,
       esel: { verts: new Set(o.esel.verts), edges: new Set(o.esel.edges), faces: new Set(o.esel.faces) }, activeFace: o.activeFace,
     })),
     materials: S.materials.map((m) => ({ ...m })),
@@ -858,6 +873,7 @@ function restore(snap) {
       o = createObject(so.name, cloneMesh(so.mesh), { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials, id: so.id, keepName: true });
       S.objects.pop();
     }
+    o.modifiers = normalizeModifiers(so.modifiers);
     o.visible = so.visible; o.selected = so.selected; o.activeFace = so.activeFace;
     o.esel = { verts: new Set(so.esel.verts), edges: new Set(so.esel.edges), faces: new Set(so.esel.faces) };
     next.push(o);
@@ -931,7 +947,7 @@ function applyShadingEnv() {
   sun.visible = S.shading === 'rendered';
   shadowFloor.visible = S.shading === 'rendered';
   gridGroup.visible = S.shading !== 'rendered';
-  for (const m of [...threeMatCache.values()]) { m.solid.needsUpdate = true; m.pbr.needsUpdate = true; }
+  for (const m of [...threeMatCache.values()]) { m.solid.needsUpdate = true; m.pbr.needsUpdate = true; m.unlit.needsUpdate = true; }
 }
 let drawNav = () => {};
 function frame(now) {

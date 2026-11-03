@@ -46,6 +46,23 @@ async function loadImageFile(file) {
     return addImageFromCanvas(uniqueImageName(file.name || 'texture', photo ? '.jpg' : '.png'), c, mime);
   } finally { URL.revokeObjectURL(url); }
 }
+function downscaleMaterialImage(material, maxSize) {
+  const im = S.images.get(material.texture);
+  if (!im) throw new Error('Choose an image first');
+  const max = Number(maxSize);
+  if (![64, 128, 256, 512, 1024, 2048].includes(max)) throw new Error('Choose a supported image size');
+  const scale = Math.min(1, max / Math.max(im.width, im.height));
+  if (scale === 1) return false;
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(im.width * scale)); c.height = Math.max(1, Math.round(im.height * scale));
+  const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = material.filter !== 'nearest'; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(im.el, 0, 0, c.width, c.height);
+  // Copy on write: other materials and undo snapshots keep the original image.
+  const next = addImageFromCanvas(uniqueImageName(im.name, im.mime === 'image/jpeg' ? '.jpg' : '.png'), c, im.mime);
+  material.texture = next.id;
+  refreshMaterials(); pushUndo('Downscale Image'); uvRequest(); refreshSheet();
+  return true;
+}
 function generateTexture(kind, size = 1024) {
   const c = document.createElement('canvas'); c.width = c.height = size;
   const x = c.getContext('2d');
@@ -87,10 +104,14 @@ async function imageFromBytes(id, name, mime, bytes) {
     return img;
   } finally { URL.revokeObjectURL(url); }
 }
+function clearImages() {
+  for (const im of S.images.values()) for (const tex of im.textures?.values() || []) tex.dispose();
+  S.images.clear();
+}
 function pruneImages() {
   const used = new Set(S.materials.map((m) => m.texture).filter(Boolean));
   for (const s of UNDO.stack) for (const m of s.snap.materials) if (m.texture) used.add(m.texture);
-  for (const id of [...S.images.keys()]) if (!used.has(id)) { const im = S.images.get(id); if (im.tex) im.tex.dispose(); S.images.delete(id); }
+  for (const id of [...S.images.keys()]) if (!used.has(id)) { const im = S.images.get(id); for (const tex of im.textures?.values() || []) tex.dispose(); S.images.delete(id); }
 }
 
 // ---------- project (de)serialization ----------
@@ -100,7 +121,7 @@ function serializeProject() {
     app: 'PocketMesh', version: 1, saved: new Date().toISOString(),
     objects: S.objects.map((o) => ({
       id: o.id, name: o.name, pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(),
-      materials: o.materials, visible: o.visible, selected: o.selected,
+      modifiers: normalizeModifiers(o.modifiers), materials: o.materials, visible: o.visible, selected: o.selected,
       mesh: { verts: o.mesh.verts, faces: o.mesh.faces, looseEdges: o.mesh.looseEdges, seams: [...o.mesh.seams], smooth: o.mesh.smooth },
     })),
     materials: S.materials,
@@ -116,13 +137,14 @@ async function loadProject(data) {
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
-  S.objects = []; S.materials = []; S.images.clear();
-  S.active = null; S.mode = 'object';
+  clearImages();
+  S.objects = []; S.materials = [];
+  S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
   for (const so of data.objects) {
     const mesh = { verts: so.mesh.verts || [], faces: (so.mesh.faces || []).map((f) => ({ v: f.v, uv: f.uv || f.v.map(() => [0, 0]), mat: f.mat | 0 })), looseEdges: so.mesh.looseEdges || [], seams: new Set(so.mesh.seams || []), smooth: !!so.mesh.smooth };
-    const o = createObject(so.name, mesh, { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials || [], id: so.id, keepName: true });
+    const o = createObject(so.name, mesh, { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials || [], modifiers: so.modifiers, id: so.id, keepName: true });
     o.visible = so.visible !== false; o.selected = !!so.selected;
   }
   S.active = S.objects.find((o) => o.id === data.active) || S.objects[0] || null;
@@ -210,7 +232,7 @@ function saveProjectFile() {
 
 // ---------- export ----------
 function hexToLinear(hex) { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; }
-function buildExportScene(selectedOnly) {
+function buildExportScene(selectedOnly, brresTextureSize = null) {
   const objs = S.objects.filter((o) => o.visible && (!selectedOnly || o.selected));
   const matIndex = new Map(), mats = [];
   const usedTexNames = new Map();
@@ -224,26 +246,35 @@ function buildExportScene(selectedOnly) {
       let nm = usedTexNames.get(im.id);
       if (!nm) { nm = im.name; let i = 1; while ([...usedTexNames.values()].includes(nm)) nm = im.name.replace(/(\.[a-z]+)$/i, `_${i++}$1`); usedTexNames.set(im.id, nm); }
       texture = { name: nm, mime: im.mime, bytes: im.bytes, width: im.width, height: im.height, filter: m.filter };
+      if (brresTextureSize) {
+        const factor = Math.min(1, brresTextureSize / Math.max(im.width, im.height));
+        const pot = (n) => 2 ** Math.floor(Math.log2(Math.max(1, n * factor)));
+        const c = document.createElement('canvas'); c.width = pot(im.width); c.height = pot(im.height);
+        const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = m.filter !== 'nearest'; ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(im.el, 0, 0, c.width, c.height);
+        texture.width = c.width; texture.height = c.height; texture.rgba = ctx.getImageData(0, 0, c.width, c.height).data;
+      }
     }
     // an untinted image is the whole base color (as in Blender), so write white for the color factor
-    mats.push({ name: m.name, color: texture && !m.tint ? [1, 1, 1] : hexToLinear(m.color), alpha: m.alpha, roughness: m.roughness, metalness: m.metalness, texture });
+    mats.push({ name: m.name, color: texture && !m.tint ? [1, 1, 1] : hexToLinear(m.color), alpha: m.alpha, roughness: m.roughness, metalness: m.metalness, texture, shader: m.shader, alphaMode: m.alphaMode, alphaCutoff: m.alphaCutoff, doubleSided: m.doubleSided, wrap: m.wrap });
     matIndex.set(id, mats.length - 1);
     return mats.length - 1;
   };
   const objects = objs.map((o) => ({
     name: o.name,
     position: o.node.position.toArray(), quaternion: o.node.quaternion.toArray(), scale: o.node.scale.toArray(),
-    mesh: o.mesh,
-    materials: o.materials.map(matFor).filter((x) => x !== null),
+    mesh: evaluateModifiers(o.mesh, o.modifiers),
+    materials: o.materials.map(matFor),
   }));
   return { objects, materials: mats };
 }
 function runExport(fmt, opts) {
-  const scene = buildExportScene(opts.selectedOnly);
+  const scene = buildExportScene(opts.selectedOnly, fmt === 'brres' ? Math.max(64, Math.min(1024, Number(opts.textureSize) || 512)) : null);
   if (!scene.objects.length) throw new Error(opts.selectedOnly ? 'No selected objects to export' : 'Nothing to export');
   const eo = { yUp: opts.yUp, applyTransforms: opts.applyTransforms, triangulate: opts.triangulate, baseName: opts.baseName };
   let files;
-  if (fmt === 'obj') files = exportOBJ(scene, eo);
+  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: opts.scale });
+  else if (fmt === 'obj') files = exportOBJ(scene, eo);
   else if (fmt === 'fbx') files = exportFBX(scene, eo);
   else if (fmt === 'dae') files = exportDAE(scene, eo);
   else if (fmt === 'glb') files = exportGLTF(scene, { ...eo, binary: true });
@@ -270,4 +301,31 @@ function importOBJText(text, fileName) {
   }
   S.active = last;
   return res.objects.length;
+}
+
+async function importMaterialFiles(files) {
+  const warnings = [], loaded = new Map();
+  const basename = (name) => name.replaceAll('\\', '/').split('/').pop().toLowerCase();
+  let count = 0;
+  for (const file of files.filter((f) => /\.mtl$/i.test(f.name))) {
+    const parsed = importMTL(await file.text()); warnings.push(...parsed.warnings);
+    for (const data of parsed.materials) {
+      const m = S.materials.find((m) => m.name === data.name) || newMaterial(data.name);
+      m.color = '#' + new THREE.Color(...data.color).getHexString();
+      m.alpha = data.alpha; m.alphaMode = data.alpha < 1 ? 'blend' : 'opaque';
+      m.roughness = data.roughness; m.shader = 'unlit';
+      m.texture = null; m.useTexture = false; m.tint = true;
+      if (data.image) {
+        const key = basename(data.image), matches = files.filter((f) => basename(f.name) === key);
+        if (matches.length === 1) {
+          if (!loaded.has(key)) loaded.set(key, await loadImageFile(matches[0]));
+          m.texture = loaded.get(key).id; m.useTexture = true;
+        } else warnings.push(data.name + ': select the image ' + data.image + ' with the MTL, or upload it in Material.');
+      }
+      if (S.active && !S.active.materials.includes(m.id)) S.active.materials.push(m.id);
+      count++;
+    }
+  }
+  for (const o of S.objects) rebuildObject(o);
+  return { count, warnings };
 }
