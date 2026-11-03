@@ -86,7 +86,20 @@ function activateExtrude() {
   extrudeHint();
 }
 function extrudeHint() {
-  hint(S.extrudeTap ? 'Tap to extrude at the selection’s depth · drag to orbit · Rotate to tap bends the next section' : 'Select geometry, then Drag extrude · or enable Tap extrude');
+  hint(S.extrudeTap ? 'Tap to extrude · drag to orbit' : S.extrudeQuick ? 'Drag selected geometry to extrude · release, then drag again' : 'Select geometry, then Drag extrude · E repeats the next step');
+}
+function extrudeVerticesOnly() { return S.selectMode === 'vert' && S.extrudeVerticesOnly; }
+// Keep pre-extrusion topology, UV selection and tags so cancelled gestures never
+// leave duplicate vertices or zero-length edges behind.
+function extrudeRollback(o) {
+  const mesh = cloneMesh(o.mesh), sel = {verts: new Set(o.esel.verts), edges: new Set(o.esel.edges), faces: new Set(o.esel.faces)};
+  const activeFace = o.activeFace, uvSel = new Set(S.uvSel);
+  return () => { o.mesh = mesh; o.esel = sel; o.activeFace = activeFace; S.uvSel = uvSel; rebuildObject(o); if (S.tool === 'extrude') extrudeHint(); };
+}
+function quickExtrudeHit(x, y, radius) {
+  if (S.tool !== 'extrude' || S.mode !== 'edit' || S.workspace !== 'model' || !S.extrudeQuick || S.extrudeTap || S.pendingTap || TF.active || PM.active || !S.active) return false;
+  const el = pickElement(x, y, radius), sel = S.active.esel;
+  return !!el && (el.type === 'vert' ? sel.verts.has(el.i) : el.type === 'edge' ? sel.edges.has(el.key) : sel.faces.has(el.i));
 }
 function tapExtrudeAt(x, y) {
   if (S.workspace !== 'model' || S.mode !== 'edit' || !S.active || TF.active || PM.active) return;
@@ -113,7 +126,7 @@ function tapExtrudeAt(x, y) {
   direction.addScaledVector(localView, -direction.dot(localView)).normalize();
   try {
     const next = cloneMesh(o.mesh);
-    const r = extrudeToPoint(next, o.esel, target.applyMatrix4(inv).toArray(), {rotate: S.extrudeRotate, rotateSource: S.extrudeRotateSource, direction: direction.toArray(), viewAxis: localView.toArray()});
+    const r = extrudeToPoint(next, o.esel, target.applyMatrix4(inv).toArray(), {rotate: S.extrudeRotate, rotateSource: S.extrudeRotateSource, direction: direction.toArray(), viewAxis: localView.toArray(), verticesOnly: extrudeVerticesOnly()});
     if (!r) return;
     o.mesh = next;
     if (r.addedVertex) S.selectMode = 'vert';
@@ -121,32 +134,50 @@ function tapExtrudeAt(x, y) {
     LAST.op = null; hideRedoPanel(); pushUndo('Tap Extrude'); onModeChanged(); onSelectionChanged();
   } catch (e) { toast(e.message, true); }
 }
-function opExtrude() {
-  if (!needSel()) return;
+function opExtrude({verticesOnly = extrudeVerticesOnly(), quick = false} = {}) {
+  if (TF.active) tfConfirm();
+  if (PM.active) pmConfirm();
+  if (!needSel()) return false;
+  if (S.tool === 'knife') knifeCancel();
+  if (verticesOnly && S.selectMode !== 'vert') setSelectMode('vert');
   const o = S.active;
-  const r = extrudeRegion(o.mesh, osel());
+  const rollback = extrudeRollback(o);
+  const selection = verticesOnly ? {verts: new Set(o.esel.verts), edges: new Set(), faces: new Set()} : osel();
+  const r = extrudeRegion(o.mesh, selection);
+  S.uvSel.clear();
   setSelVerts(r.verts);
   rebuildObject(o);
   let axis = null;
-  if (r.hadFaces && vlen(r.normal) > 0.5) axis = new THREE.Vector3(...r.normal).applyQuaternion(new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().extractRotation(o.node.matrixWorld))).normalize();
+  if (r.hadFaces && vlen(r.normal) > 0.5) axis = new THREE.Vector3(...r.normal).applyMatrix3(new THREE.Matrix3().getNormalMatrix(o.node.matrixWorld)).normalize();
   hideRedoPanel(); LAST.op = null;
-  tfStart('move', { label: 'Extrude', customAxis: axis, undoLabel: 'Extrude', onCancel: () => pushUndo('Extrude') });
+  const ok = tfStart('move', { label: verticesOnly ? 'Extrude Vertices' : 'Extrude', customAxis: axis, undoLabel: 'Extrude', quickExtrude: quick,
+    next: () => opExtrude({verticesOnly}), onCancel: rollback, onConfirm: () => { if (S.tool === 'extrude') extrudeHint(); } });
+  if (!ok) rollback();
+  return ok;
 }
 function opExtrudeIndividual() {
+  if (TF.active) tfConfirm();
+  if (PM.active) pmConfirm();
   if (!needSel('faces')) return;
   const o = S.active;
+  const rollback = extrudeRollback(o);
   const r = extrudeIndividual(o.mesh, new Set(osel().faces));
+  S.uvSel.clear();
   setSelVerts(r.verts);
   rebuildObject(o);
-  tfStart('shrink', { label: 'Extrude Faces', undoLabel: 'Extrude Individual Faces', onCancel: () => pushUndo('Extrude Individual Faces') });
+  tfStart('shrink', { label: 'Extrude Faces', undoLabel: 'Extrude Individual Faces', next: opExtrudeIndividual, onCancel: rollback });
 }
 function opExtrudeNormals() {
+  if (TF.active) tfConfirm();
+  if (PM.active) pmConfirm();
   if (!needSel('faces')) return;
   const o = S.active;
+  const rollback = extrudeRollback(o);
   const r = extrudeRegion(o.mesh, osel());
+  S.uvSel.clear();
   setSelVerts(r.verts);
   rebuildObject(o);
-  tfStart('shrink', { label: 'Extrude Along Normals', undoLabel: 'Extrude Along Normals', onCancel: () => pushUndo('Extrude Along Normals') });
+  tfStart('shrink', { label: 'Extrude Along Normals', undoLabel: 'Extrude Along Normals', next: opExtrudeNormals, onCancel: rollback });
 }
 function opDuplicate() {
   if (S.mode === 'object') {

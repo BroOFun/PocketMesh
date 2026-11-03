@@ -18,7 +18,8 @@
     "test:creases:browser": "node test/creases-browser.cjs",
     "test:track-editor:browser": "node test/track-editor-browser.cjs",
     "test:uv-controls:browser": "node test/uv-controls-browser.cjs",
-    "test:knife:browser": "node test/knife-browser.cjs"
+    "test:knife:browser": "node test/knife-browser.cjs",
+    "test:quick-extrude:browser": "node test/quick-extrude-browser.cjs"
   },
   "license": "UNLICENSED",
   "dependencies": {

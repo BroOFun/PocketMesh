@@ -198,18 +198,31 @@ function buildSubbar() {
       chip('', 'Undo cut', knifeUndo));
     return;
   }
+  if (S.tool === 'extrude' && S.mode === 'edit' && S.workspace === 'model') {
+    const toggle = key => {
+      if (TF.active) tfConfirm();
+      S[key] = key === 'extrudeQuick' ? !(S.extrudeQuick && !S.extrudeTap) : !S[key];
+      settingsSet(key, S[key]);
+      if (key === 'extrudeQuick' && S[key]) { S.extrudeTap = false; settingsSet('extrudeTap', false); }
+      buildSubbar(); extrudeHint();
+    };
+    bar.append(chip('', 'Quick drag', () => toggle('extrudeQuick'), {on: S.extrudeQuick && !S.extrudeTap}),
+      chip('', 'Drag extrude', opExtrude),
+      chip('', 'Done', () => { if (TF.active) tfConfirm(); S.tool = 'select'; hint(null); buildSubbar(); buildTools(); gizmoSync(); }, {aria: 'Done extruding'}),
+      chip('Multiselect', S.multiSelect ? 'Done' : '', () => {
+        S.multiSelect = !S.multiSelect; S.selOp = S.multiSelect ? 'add' : 'set';
+        if (S.multiSelect) { S.extrudeTap = false; settingsSet('extrudeTap', false); }
+        buildSubbar(); extrudeHint();
+      }, {on: S.multiSelect, aria: 'Extrude multiselect'}));
+    if (S.selectMode === 'vert') bar.append(chip('', 'Vertices only', () => toggle('extrudeVerticesOnly'), {on: S.extrudeVerticesOnly}));
+    bar.append(chip('', 'Tap extrude', () => toggle('extrudeTap'), {on: S.extrudeTap}),
+      chip('', 'Rotate to tap', () => toggle('extrudeRotate'), {on: S.extrudeRotate}));
+    if (S.extrudeRotate) bar.append(chip('', 'Rotate source', () => toggle('extrudeRotateSource'), {on: S.extrudeRotateSource}));
+    return;
+  }
   if (trackSubbar(bar)) return;
   if (S.tool === 'ruler') {
     bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
-    return;
-  }
-  if (S.tool === 'extrude' && S.mode === 'edit') {
-    const toggle = (key) => { S[key] = !S[key]; settingsSet(key, S[key]); buildSubbar(); extrudeHint(); };
-    bar.prepend(chip('', 'Drag extrude', opExtrude),
-      chip('', 'Tap extrude', () => toggle('extrudeTap'), {on: S.extrudeTap}),
-      chip('', 'Rotate to tap', () => toggle('extrudeRotate'), {on: S.extrudeRotate}));
-    if (S.extrudeRotate) bar.append(chip('', 'Rotate source', () => toggle('extrudeRotateSource'), {on: S.extrudeRotateSource}));
-    bar.append(chip('', 'Done', () => { if (TF.active) tfConfirm(); S.tool = 'select'; hint(null); buildSubbar(); buildTools(); gizmoSync(); }, {aria: 'Done extruding'}));
     return;
   }
   if (S.creaseEdit === S.active?.id && S.mode === 'edit') {
@@ -481,6 +494,7 @@ function menuMesh() {
   menuSheet('Mesh', [
     { group: 'Extrude' },
     { label: 'Extrude Region', icon: 'extrude', key: 'E', run: opExtrude },
+    { label: 'Extrude Vertices', icon: 'vert', desc: 'Extend each selected vertex with a new edge', run: () => opExtrude({verticesOnly: true}) },
     { label: 'Extrude Individual Faces', icon: 'extrude', key: 'Alt E', run: opExtrudeIndividual },
     { label: 'Extrude Along Normals', icon: 'extrude', run: opExtrudeNormals },
     { label: 'Shrink / Fatten', icon: 'normals', key: 'Alt S', desc: 'Move along vertex normals', run: () => tfStart('shrink') },
@@ -1097,14 +1111,14 @@ const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastT
 function cancelHold() { clearTimeout(G.holdTimer); G.holdTimer = null; }
 function beginHold(e, p) {
   cancelHold();
-  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || !['select', 'move', 'rotate', 'scale'].includes(S.tool)) return;
+  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || (S.tool === 'extrude' && S.extrudeTap) || !['select', 'move', 'rotate', 'scale', 'extrude'].includes(S.tool)) return;
   const object = S.active, mode = S.mode, selectMode = S.selectMode, tool = S.tool;
   G.holdTimer = setTimeout(() => {
     if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== tool) return;
     const el = S.mode === 'edit' && S.active ? pickElement(p.x, p.y, e.pointerType === 'mouse' ? 14 : 28) : null;
     const ob = S.mode === 'object' ? pickObject(p.x, p.y) : null;
     if (!el && !ob) return;
-    S.selOp = 'add'; S.multiSelect = true; S.tool = 'select'; buildTools();
+    S.selOp = 'add'; S.multiSelect = true; S.tool = tool === 'extrude' ? 'extrude' : 'select'; buildTools();
     if (el) {
       // A hold always adds its target; subsequent taps toggle it.
       const selected = el.type === 'vert' ? object.esel.verts.has(el.i) : el.type === 'edge' ? object.esel.edges.has(el.key) : object.esel.faces.has(el.i);
@@ -1131,12 +1145,18 @@ c3d.addEventListener('pointerdown', (e) => {
   G.maxPointers = Math.max(G.maxPointers, G.p.size);
   if (G.p.size === 1) {
     G.t0 = performance.now(); G.moved = false; G.maxPointers = 1;
+    G.extrudeCandidate = false;
     if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
     else if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
-    if (G.mode === 'pending') beginHold(e, p);
+    if (G.mode === 'pending') {
+      G.extrudeCandidate = quickExtrudeHit(p.x, p.y, e.pointerType === 'mouse' ? 14 : 28);
+      beginHold(e, p);
+    }
   } else if (G.p.size === 2) {
+    if (TF.active?.quickExtrude) tfCancel();
+    G.extrudeCandidate = false;
     if (G.mode === 'box') { $('#boxrect').hidden = true; }
     G.mode = 'two'; G.two = twoInfo(); G.twist = 0; G.twisting = false;
   } else G.mode = 'multi';
@@ -1178,14 +1198,15 @@ c3d.addEventListener('pointermove', (e) => {
   if (G.mode === 'pending' && G.moved) {
     if (TF.active) G.mode = 'tf';
     else if (PM.active) G.mode = 'pm';
+    else if (G.extrudeCandidate && quickExtrudeHit(pt.x0, pt.y0, e.pointerType === 'mouse' ? 14 : 28)) G.mode = opExtrude({quick: true}) ? 'quickExtrude' : 'none';
     else if (S.tool === 'box' && !S.pendingTap) { G.mode = 'box'; G.box = { x0: pt.x0, y0: pt.y0 }; }
     else G.mode = S.navStyle === 'map' ? 'pan' : 'orbit';
-    if (G.mode === 'tf') tfDrag(p.x - pt.x0, p.y - pt.y0);
+    if (G.mode === 'tf' || G.mode === 'quickExtrude') tfDrag(p.x - pt.x0, p.y - pt.y0);
     if (G.mode === 'pm') pmDrag(p.x - pt.x0);
     return;
   }
   if (G.mode === 'tfclick') { tfDrag(dx, dy); return; }
-  if (G.mode === 'tf') tfDrag(dx, dy);
+  if (G.mode === 'tf' || G.mode === 'quickExtrude') tfDrag(dx, dy);
   else if (G.mode === 'pm') pmDrag(dx);
   else if (G.mode === 'orbit') { orbit(dx, dy); CAM.viewName = null; }
   else if (G.mode === 'pan') pan(dx, dy);
@@ -1205,6 +1226,9 @@ function endPointer(e) {
   G.p.delete(e.pointerId);
   if (G.p.size > 0) { if (G.mode === 'two' && G.p.size === 1) G.mode = 'none'; return; }
   const quick = performance.now() - G.t0 < 320;
+  if (G.mode === 'quickExtrude' && TF.active?.quickExtrude) {
+    if (e.type === 'pointerup') tfConfirm(); else tfCancel();
+  }
   if (e.type === 'pointerup') {
     if (G.maxPointers === 2 && !G.moved && quick && G.mode !== 'box') { if (knifeActive()) knifeUndo(); else if (TF.active) tfCancel(); else if (PM.active) pmCancel(); else undo(); }
     else if (G.maxPointers >= 3 && !G.moved && quick && !knifeActive()) redo();
@@ -1219,7 +1243,7 @@ function endPointer(e) {
 c3d.addEventListener('pointerup', endPointer);
 c3d.addEventListener('pointercancel', endPointer);
 c3d.addEventListener('lostpointercapture', endPointer);
-function cancelViewportGesture() { cancelHold(); G.p.clear(); G.mode = null; $('#boxrect').hidden = true; }
+function cancelViewportGesture() { cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
 window.addEventListener('blur', cancelViewportGesture);
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
 c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
@@ -1237,7 +1261,7 @@ function handleTap(x, y, ptype) {
   if (S.tool === 'ruler') { rulerTap(x,y,radius); return; }
   if (S.tool === 'cursor') { placeCursor(x, y); return; }
   const now = performance.now();
-  const dbl = !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
+  const dbl = S.tool !== 'extrude' && !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
   G.lastTap = { t: now, x, y };
   if (S.mode === 'edit' && S.active) {
     if (dbl && S.selectMode !== 'vert') { G.lastTap = null; loopSelectAt(x, y, 'loop', S.selOp === 'sub' ? 'sub' : 'add'); return; }
@@ -1384,6 +1408,7 @@ document.addEventListener('keydown', (e) => {
     const t = TF.active;
     if (k === 'Escape') { tfCancel(); e.preventDefault(); return; }
     if (k === 'Enter') { tfConfirm(); e.preventDefault(); return; }
+    if (k.toLowerCase() === 'e' && t.next && !ctrl && !e.altKey) { if (!e.repeat) tfNextExtrude(); e.preventDefault(); return; }
     if (/^[xyzXYZ]$/.test(k)) { tfSetAxis('xyz'.indexOf(k.toLowerCase()), e.shiftKey); e.preventDefault(); return; }
     if (/^[0-9.\-]$/.test(k) || k === 'Backspace') {
       if (k === 'Backspace') t.num = t.num.slice(0, -1); else if (k === '-') t.num = t.num.startsWith('-') ? t.num.slice(1) : '-' + t.num; else t.num += k;
@@ -1476,6 +1501,8 @@ document.addEventListener('keydown', (e) => {
 
 // ---------- boot ----------
 function loadSettings() {
+  S.extrudeQuick = settingsGet('extrudeQuick', true) !== false;
+  S.extrudeVerticesOnly = settingsGet('extrudeVerticesOnly', false) === true;
   S.extrudeTap = settingsGet('extrudeTap', false) === true;
   S.extrudeRotate = settingsGet('extrudeRotate', false) === true;
   S.extrudeRotateSource = settingsGet('extrudeRotateSource', true) !== false;
