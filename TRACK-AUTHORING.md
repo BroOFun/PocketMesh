@@ -3,8 +3,7 @@
 PocketMesh shares one model and camera between **Model**, **KCL** and **KMP**
 workspaces. It exports `course_model.brres`, `course.kcl` and `course.kmp`.
 The KMP editor supports a start point and automatic drive-test scaffolding,
-or updating the first start point in an existing KMP. Full race authoring and
-SZS packaging still require other tools.
+or updating the first start point in an existing KMP. Full race authoring still requires other tools. The SZS editor replaces files in an existing track package.
 
 ## Editing
 
@@ -60,7 +59,7 @@ Escape again or **Done** leaves the tool.
 
 1. Open **File → BRRES Editor… → Open BRRES…** and choose an uncompressed `.brres`.
    **Use current scene** creates an archive from the visible modeling scene,
-   using scale 1 and a maximum texture dimension of 512. The modeling scene
+   using the shared Wii export scale and a maximum texture dimension of 512. The modeling scene
    remains open separately.
 2. Choose a resource. The inspector lists resource types and versions, archive
    byte order/size and model vertex/polygon counts. The **Materials** list shows
@@ -170,12 +169,32 @@ need the appropriate KMP objects/routes, lighting data or track replacement slot
 Selecting a flag alone does not create those dependencies. Boost ramps and jump
 pads are already trickable; avoid enabling the additional trick flag on them.
 
+### Shared controls and material images
+
+Orbit, pan, zoom, perspective/orthographic and view-axis buttons work in every
+workspace. KCL also offers the same **Move / Rotate / Scale** object gizmos as
+Model. These transform the shared mesh and therefore affect subsequent BRRES and
+KCL exports. KMP offers **Move / Rotate** gizmos for the start point: X/Y handles
+snap height to the nearby model surface, while Z changes height directly. Rotate
+changes driving yaw. Both support project Undo/Redo. G/R/S choose the corresponding
+gizmos in KCL; G/R do so in KMP. Home frames the selection (Start in KMP).
+
+**KCL → Materials & flags** shows actual image thumbnails, texture filenames and
+current collision assignments. Color-only materials show a swatch, and numeric
+material IDs distinguish repeated names. Select a card, then assign its road type.
+**Show textures on track** switches to Material Preview and hides collision tint;
+**Colors On/Off** in the shelf toggles tint again. KCL types have no fixed required
+texture: the same image can be normal road, boost, or another assigned behavior.
+
 ## KMP workspace
 
-1. Choose **KMP → Place Start**, then tap a visible drivable surface. The point
+1. Choose **KMP → Place Start**, then tap a visible model surface. With no start
+   point yet, KMP activates placement automatically. The point
    uses the hit's height (including sloped or raised roads), plus **Height above
-   surface** (default 0.2 model units). Disabled collision and non-road types
-   are excluded from placement.
+   surface** (default 0.2 model units). Picking works from either side of a face,
+   even with backface culling or wireframe display. Collision flags no longer block
+   placement: a non-drivable or disabled surface prompts a warning to fix its KCL
+   assignment. There is no invisible ground-plane fallback.
 2. Choose **Aim Start** and tap ahead on the road, or enter a Wii yaw in degrees.
    0° points toward editor −Y; 90° points toward +X. Cardinal directions avoid
    the vanilla minimap start-line rotation issue. The arrow previews the heading.
@@ -205,8 +224,41 @@ switching itself does not reset the model, history or camera.
 
 A game test still needs a suitable **SZS track package** with the BRRES, KCL and
 KMP, plus required resources such as minimap/sky and any referenced object files.
-PocketMesh does not build that archive yet. Noclip validates visuals, not racing
+Use **SZS → Open SZS** to replace files in an existing package. Noclip validates visuals, not racing
 or collision. No Wii/Dolphin gameplay test has been performed for these exports.
+
+## SZS archive editor
+
+1. Tap **SZS** beside the workspace selector, or **File → SZS Editor**. Open an
+   existing `.szs` (Yaz0-compressed U8) or uncompressed `.u8`/`.arc` track archive.
+   Browse all folders/files or search by path/type; large listings are paginated.
+2. Select a file and choose **Replace selected file…**. The archive path stays
+   the same regardless of the uploaded filename. **Download selected file** extracts
+   its current bytes. **Revert selected file** or **Revert all replacements** restores
+   the originally opened version.
+3. **Use current project course files** exports all visible scene objects/materials
+   to `course_model.brres`, material collision to `course.kcl`, and the current
+   start/KMP setup to `course.kmp`, using the shared Wii scale. All three must
+   already exist uniquely in the package. All exports must succeed before any
+   are staged. For duplicate basenames, select and replace each exact entry.
+   The individual file card also offers a current-project replacement button.
+4. A selected BRRES can open in the texture editor. After editing, return to
+   **SZS**, select the destination file and choose **Replace with BRRES editor:**
+   followed by the displayed archive name. This copies the texture editor's
+   current result into that selected entry; it does not happen automatically.
+5. Choose **Prepare SZS download**, then **Save & Send SZS…**. Compression runs in
+   a background worker; the final tap opens sharing/download on supported devices.
+   Reopen the saved copy to inspect it. Pending archive edits are separate from
+   project autosave and are lost when closing/reloading the app or opening another
+   valid archive. Invalid imports preserve the current archive and replacements.
+
+Untouched file bytes, names, directory hierarchy, empty directories and node order
+are preserved. Repacking updates file offsets/sizes and aligns data to 32 bytes.
+Limits are 128 MiB unpacked and 50,000 entries. This supports Wii U8/Yaz0 archives,
+not every format that uses the SZS extension (e.g. SARC, WU8 or other compression).
+It does not add/remove/rename entries, import arbitrary BRRES geometry into Model,
+or automatically fit the donor archive's minimap, sky, object placements or routes
+to a new track. In-game validation still requires Wii/Dolphin.
 
 ### Format and compatibility checks
 
@@ -215,6 +267,13 @@ lookups around 400 triangles, axis/scale conversion and KMP section preservation
 `npm run test:workspaces:browser` covers desktop and emulated iPhone workspace
 controls, material assignments, finish labels, surface-height placement, heading,
 file downloads, KMP import and project/undo behavior.
+`npm run test:szs:browser` covers desktop/emulated-iPhone start placement on
+back-facing and disabled-collision surfaces, camera/transform gestures, material
+image previews, SZS import/search/pagination, replacement/revert, atomic course
+export, error preservation, worker compression and downloaded archive contents.
+`WIIMM_BIN=/path/to/wiimm/bin node test/szs.test.mjs` additionally checks
+independent extraction/repacking by Wiimm. Empty files are tested directly;
+Wiimm’s extractor treats zero-length entries as extending to the next offset.
 
 For independent checking with locally downloaded tools and external samples:
 
@@ -226,7 +285,9 @@ Wiimm v2.42a parses the generated files and reports no KCL or KMP warnings for
 the test fixtures (the intentional item-route loop produces an informational
 hint). These file checks are not an in-game compatibility guarantee.
 
-Sources: [KCL format](https://mkwiiki.org/wiki/KCL_(File_Format)),
+Sources: [U8 archive format](https://mkwiiki.org/wiki/U8_(File_Format)),
+[Yaz0 compression](https://mkwiiki.org/wiki/Yaz0_(File_Format)),
+[KCL format](https://mkwiiki.org/wiki/KCL_(File_Format)),
 [KCL types and variants](https://mkwiiki.org/wiki/KCL_flag),
 [game collision attribute definitions](https://github.com/doldecomp/mkw/blob/main/src/field/KCollision.hpp),
 [KMP format](https://mkwiiki.org/wiki/KMP_(File_Format)),

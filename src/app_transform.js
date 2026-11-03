@@ -523,15 +523,17 @@ function pmCancel() {
 let GZ = null;
 function gizmoSync() {
   const toolMode = { move: 'translate', rotate: 'rotate', scale: 'scale' }[S.tool];
-  const show = S.workspace === 'model' && !!toolMode && !TF.active && !PM.active && hasAnySel() && S.view !== 'uv';
+  const startTool = S.workspace === 'kmp';
+  const show = !!toolMode && !TF.active && !PM.active && S.view !== 'uv' && (startTool ? !!S.track.start && S.tool !== 'scale' : hasAnySel());
   tc.enabled = show; tc.visible = show;
   if (!show) { requestRender(); return; }
   tc.setMode(toolMode);
+  tc.showX = tc.showY = !(startTool && toolMode === 'rotate'); tc.showZ = true;
   tc.setTranslationSnap(S.snap ? S.snapMove : null);
   tc.setRotationSnap(S.snap ? S.snapRot * DEG : null);
   tc.setScaleSnap(S.snap ? S.snapScale : null);
   if (!tc.dragging) {
-    const st = tfBuildState('move');
+    const st = startTool ? {pivot: new THREE.Vector3(...S.track.start.position), orient: new THREE.Quaternion()} : tfBuildState('move');
     if (st) {
       gizmoProxy.position.copy(st.pivot);
       gizmoProxy.quaternion.copy(st.orient);
@@ -542,6 +544,10 @@ function gizmoSync() {
   requestRender();
 }
 tc.addEventListener('mouseDown', () => {
+  if (S.workspace === 'kmp') {
+    GZ = S.track.start ? {start: structuredClone(S.track.start), axis: tc.axis, p0: gizmoProxy.position.clone(), q0: gizmoProxy.quaternion.clone()} : null;
+    return;
+  }
   GZ = { st: tfBuildState({ translate: 'move', rotate: 'rotate', scale: 'scale' }[tc.mode]), p0: gizmoProxy.position.clone(), q0: gizmoProxy.quaternion.clone() };
   if (!GZ.st) GZ = null;
 });
@@ -549,12 +555,21 @@ tc.addEventListener('objectChange', () => {
   if (!GZ) return;
   const T = gizmoProxy.position.clone().sub(GZ.p0);
   const R = gizmoProxy.quaternion.clone().multiply(GZ.q0.clone().invert());
+  if (GZ.start) {
+    if (tc.mode === 'translate') S.track.start.position = GZ.start.position.map((n, i) => n + T.getComponent(i));
+    else S.track.start.rotation[1] = GZ.start.rotation[1] + new THREE.Euler().setFromQuaternion(R, 'XYZ').z / DEG;
+    requestRender(); return;
+  }
   const Sv = gizmoProxy.scale.clone();
   GZ.st.orient = GZ.q0.clone();
   tfApplyState(GZ.st, { T, R, S: Sv });
+  if (S.workspace === 'kcl') trackRefresh();
 });
 tc.addEventListener('mouseUp', () => {
   if (!GZ) return;
+  if (GZ.start && tc.mode === 'translate' && GZ.axis && !GZ.axis.includes('Z')) {
+    try { trackSnapStart(); gizmoProxy.position.fromArray(S.track.start.position); } catch (e) { toast(e.message, true); }
+  }
   GZ = null;
   pushUndo({ translate: 'Move', rotate: 'Rotate', scale: 'Scale' }[tc.mode]);
   onSelectionChanged();

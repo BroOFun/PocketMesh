@@ -175,10 +175,10 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  for (const t of (S.workspace === 'model' ? TOOLS3D : S.workspace === 'kcl' ? [['select','select','Pick collision material']] : [['place','cursor','Place Start'],['aim','rotate','Aim Start']])) {
+  for (const t of (S.workspace === 'model' ? TOOLS3D : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
-    const b = h('button', { class: (S.workspace === 'kmp' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { if (S.workspace === 'kmp') { trackAction(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
+    b.addEventListener('click', () => { if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
@@ -260,7 +260,7 @@ function buildNavButtons() {
   const pr = h('button', { id: 'btnOrtho', html: icon(CAM.ortho ? 'ortho' : 'persp'), 'aria-label': 'Toggle perspective / orthographic' });
   pr.addEventListener('click', () => toggleOrtho());
   const fr = h('button', { html: icon('frame'), 'aria-label': 'Frame selected' });
-  fr.addEventListener('click', () => frameSelected());
+  fr.addEventListener('click', () => S.workspace === 'kmp' && S.track.start ? trackFocusStart() : frameSelected());
   const xr = h('button', { id: 'btnXray', class: S.xray ? 'on' : '', html: icon('xray'), 'aria-label': 'X-ray: see and select through the mesh' });
   xr.addEventListener('click', () => { S.xray = !S.xray; xr.classList.toggle('on', S.xray); refreshMaterials(); refreshAllObjects(); toast(S.xray ? 'X-ray on' : 'X-ray off'); });
   const sh = h('button', { id: 'btnShade', class: 'shade', html: icon(SHADES.find((x) => x[0] === S.shading)[1]), 'aria-label': 'Viewport shading' });
@@ -501,6 +501,7 @@ function menuFile() {
     { group: 'Track workspaces' },
     { label: 'KCL Editor', icon: 'layers', run: () => { setWorkspace('kcl'); openKCL(); } },
     { label: 'KMP Editor', icon: 'cursor', run: () => { setWorkspace('kmp'); openKMP(); } },
+    { label: 'SZS Editor…', icon: 'folder', desc: 'Open a track archive and replace its files', run: openSZSEditor },
     { group: 'Exchange' },
     { label: 'BRRES Editor…', icon: 'folder', desc: 'Inspect resources, preview and resize textures', run: openBRRESEditor },
     { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
@@ -1288,7 +1289,12 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Numpad5') { toggleOrtho(); return; }
     if (e.code === 'NumpadDecimal') { frameSelected(); return; }
   }
-  if (S.workspace !== 'model') { if (k === 'Escape') { TRACKVIEW.action = 'select'; hint(null); } return; }
+  if (S.workspace !== 'model') {
+    if (k === 'Home') { S.workspace === 'kmp' && S.track.start ? trackFocusStart() : frameSelected(); return; }
+    if (k === 'Escape') { trackTool('select'); return; }
+    if (!ctrl && !e.altKey) { const tool = {g:'move',r:'rotate',s:'scale'}[k.toLowerCase()]; if (tool && !(S.workspace === 'kmp' && tool === 'scale')) trackTool(tool); }
+    return;
+  }
   const edit = S.mode === 'edit';
   const lk = k.toLowerCase();
   if (k === 'Tab') { e.preventDefault(); setMode(edit ? 'object' : 'edit'); return; }
@@ -1379,7 +1385,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

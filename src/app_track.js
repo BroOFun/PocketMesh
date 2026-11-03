@@ -10,6 +10,7 @@ function trackCommit(label) {
   trackRefresh();
   buildSubbar();
   refreshSheet(true);
+  gizmoSync();
   requestRender();
 }
 function setTrackScale(value) {
@@ -37,7 +38,7 @@ function setWorkspace(workspace) {
   if (workspace !== 'model' && S.mode === 'edit') setMode('object');
   S.workspace = workspace;
   S.tool = 'select';
-  TRACKVIEW.action = 'select';
+  TRACKVIEW.action = workspace === 'kmp' && !S.track.start ? 'place' : 'select';
   if (workspace !== 'model' && S.view !== '3d') setWorkView('3d');
   $('#btnMode').hidden = workspace !== 'model';
   $('#btnView').hidden = workspace !== 'model';
@@ -65,6 +66,7 @@ function trackSubbar(bar) {
       setWorkspace,
     ),
   );
+  bar.append(trackButton('SZS', openSZSEditor));
   if (S.workspace === 'model') return false;
   bar.append(
     trackButton(S.workspace === 'kcl' ? 'Materials & flags' : 'Start point', S.workspace === 'kcl' ? openKCL : openKMP),
@@ -99,12 +101,33 @@ function buildTrackShelf(sh) {
   );
   return true;
 }
+function trackTool(tool) {
+  if (GZ && tc.dragging) return;
+  if (S.workspace === 'kmp' && ['move', 'rotate'].includes(tool) && !S.track.start) {
+    trackAction('place');
+    toast('Tap the track to place Start first');
+    return;
+  }
+  closeSheet();
+  S.tool = tool;
+  TRACKVIEW.action = 'select';
+  S.pendingTap = null;
+  hint(
+    tool === 'move' && S.workspace === 'kmp'
+      ? 'Drag the start arrows. X/Y movement snaps height; Z adjusts height directly.'
+      : null,
+  );
+  buildTools();
+  gizmoSync();
+}
 function trackAction(action) {
   if (action === 'aim' && !S.track.start) {
     toast('Place a start point first', true);
     return;
   }
   closeSheet();
+  S.tool = 'select';
+  cancelViewportGesture();
   TRACKVIEW.action = action;
   hint(
     action === 'place'
@@ -112,6 +135,7 @@ function trackAction(action) {
       : 'Tap ahead of Start to set the driving direction.',
   );
   buildTools();
+  gizmoSync();
 }
 function trackScene() {
   const ids = new Map(S.materials.map((m, i) => [m.id, i]));
@@ -276,18 +300,30 @@ function drawTrack() {
     label(p, 'Start · ' + fmt(start.rotation[1], 1) + '°', '#71f0aa');
   }
 }
+// Picking must not depend on display shading, backface culling, or assigned KCL flags.
+const trackPickMaterial = new THREE.MeshBasicMaterial({ side: THREE.DoubleSide });
+function trackHitMaterial(hit) {
+  const o = hit.object.userData.obj;
+  const f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]];
+  return matById(o.materials[f.mat] ?? o.materials[0]);
+}
+function trackIsDrivable(hit) {
+  const m = trackHitMaterial(hit);
+  const type = m?.kclFinish ? 0 : (m?.kclFlag ?? 0) & 31;
+  return m?.kclEnabled !== false && [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 19, 21, 22, 23, 29].includes(type);
+}
 function trackHits(ray, drivable = false) {
   scene.updateMatrixWorld(true);
   const nodes = S.objects.filter((o) => o.visible).map((o) => o.meshNode);
-  return ray.intersectObjects(nodes, false).filter((hit) => {
-    if (!drivable) return true;
-    const o = hit.object.userData.obj,
-      f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]],
-      m = matById(o.materials[f.mat] ?? o.materials[0]);
-    if (m?.kclEnabled === false) return false;
-    const type = m?.kclFinish ? 0 : (m?.kclFlag ?? 0) & 31;
-    return [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 19, 21, 22, 23, 29].includes(type);
-  });
+  const materials = nodes.map((node) => node.material);
+  try {
+    for (const node of nodes) node.material = trackPickMaterial;
+    return ray.intersectObjects(nodes, false).filter((hit) => !drivable || trackIsDrivable(hit));
+  } finally {
+    nodes.forEach((node, i) => {
+      node.material = materials[i];
+    });
+  }
 }
 function trackTap(x, y) {
   if (S.workspace === 'kcl') {
@@ -296,17 +332,18 @@ function trackTap(x, y) {
     const o = hit.object.userData.obj,
       f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]];
     TRACKVIEW.material = o.materials[f.mat] ?? o.materials[0];
-    trackRefresh();
-    openKCL();
+    selectObject(o, S.selOp);
+    if (S.tool === 'select') openKCL();
     return;
   }
   if (TRACKVIEW.action === 'select') {
+    if (S.tool === 'move' || S.tool === 'rotate') return;
     openKMP();
     return;
   }
-  const hit = trackHits(screenRay(x, y), true)[0];
+  const hit = trackHits(screenRay(x, y))[0];
   if (!hit) {
-    toast('Tap a visible drivable surface. Check its KCL type.', true);
+    toast('No model surface under that tap. Frame the track, then tap a face.', true);
     return;
   }
   if (TRACKVIEW.action === 'place') {
@@ -315,7 +352,12 @@ function trackTap(x, y) {
       rotation: S.track.start?.rotation.slice() || [0, 0, 0],
     };
     trackCommit('Place start');
-    toast('Start placed at road height');
+    toast(
+      trackIsDrivable(hit)
+        ? 'Start placed at surface height'
+        : 'Start placed. Assign a drivable KCL type to this surface before testing.',
+      !trackIsDrivable(hit),
+    );
   } else {
     const p = S.track.start.position,
       dx = hit.point.x - p[0],
@@ -328,6 +370,7 @@ function trackTap(x, y) {
   TRACKVIEW.action = 'select';
   hint(null);
   buildTools();
+  gizmoSync();
 }
 function trackSnapStart() {
   if (!S.track.start) throw new Error('Place a start point first');
@@ -336,10 +379,10 @@ function trackSnapStart() {
   for (const o of S.objects) if (o.visible) box.expandByObject(o.node);
   if (box.isEmpty()) throw new Error('No track geometry');
   const ray = new THREE.Raycaster(new THREE.Vector3(p[0], p[1], box.max.z + 1), new THREE.Vector3(0, 0, -1));
-  const hits = trackHits(ray, true).sort(
+  const hits = trackHits(ray).sort(
     (a, b) => Math.abs(a.point.z + S.track.clearance - p[2]) - Math.abs(b.point.z + S.track.clearance - p[2]),
   );
-  if (!hits.length) throw new Error('No drivable surface beneath this X/Y position');
+  if (!hits.length) throw new Error('No model surface beneath this X/Y position');
   p[2] = hits[0].point.z + S.track.clearance;
 }
 function trackFocusBox(box) {
@@ -362,6 +405,29 @@ function trackFocusStart() {
 function openKCL() {
   openSheet('KCL · Material collision', buildKCL, { panel: true, kind: 'kcl' });
 }
+function trackMaterialPreview(m, large = false) {
+  const image = S.images.get(m.texture);
+  const canvas = h('canvas', {
+    class: 'collision-preview' + (large ? ' large' : ''),
+    width: large ? 256 : 96,
+    height: large ? 160 : 72,
+    'aria-label': 'Texture preview for ' + m.name,
+  });
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = m.color || '#888888';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  if (image) {
+    const scale = Math.min(canvas.width / image.width, canvas.height / image.height);
+    ctx.drawImage(
+      image.el,
+      (canvas.width - image.width * scale) / 2,
+      (canvas.height - image.height * scale) / 2,
+      image.width * scale,
+      image.height * scale,
+    );
+  }
+  return canvas;
+}
 function buildKCL(body) {
   const ms = trackMaterials(),
     m = trackCurrentMaterial();
@@ -377,6 +443,40 @@ function buildKCL(body) {
     return;
   }
   TRACKVIEW.material = m.id;
+  body.append(
+    h(
+      'div',
+      { class: 'collision-material-grid', 'aria-label': 'Material images' },
+      ...ms.map((mat) => {
+        const image = S.images.get(mat.texture);
+        return h(
+          'button',
+          {
+            class: 'collision-material' + (mat.id === m.id ? ' on' : ''),
+            'aria-label': 'Choose material ' + mat.id + ': ' + mat.name,
+            'aria-pressed': String(mat.id === m.id),
+            onclick: () => {
+              TRACKVIEW.material = mat.id;
+              trackRefresh();
+              refreshSheet(true);
+            },
+          },
+          trackMaterialPreview(mat),
+          h('strong', {}, mat.name + ' · #' + mat.id),
+          h('span', { class: 'muted' }, image?.name || 'Color only'),
+          h(
+            'span',
+            {},
+            mat.kclEnabled === false
+              ? 'No collision'
+              : mat.kclFinish
+                ? 'Finish line · Road'
+                : KCL_TYPES[(mat.kclFlag ?? 0) & 31].name,
+          ),
+        );
+      }),
+    ),
+  );
   const flag = m.kclFinish ? 0 : (m.kclFlag ?? 0),
     f = decodeKCLFlag(flag),
     type = KCL_TYPES[f.type];
@@ -387,6 +487,19 @@ function buildKCL(body) {
   const c = h(
     'div',
     { class: 'card' },
+    trackMaterialPreview(m, true),
+    h(
+      'span',
+      { class: 'muted' },
+      S.images.has(m.texture)
+        ? S.images.get(m.texture).name +
+            ' · ' +
+            S.images.get(m.texture).width +
+            ' × ' +
+            S.images.get(m.texture).height +
+            (m.useTexture === false ? ' · texture disabled' : '')
+        : 'No image · color ' + m.color,
+    ),
     field(
       'Material',
       selectInput(
@@ -401,6 +514,13 @@ function buildKCL(body) {
       ),
     ),
     trackButton('Focus this material', trackFocusMaterial),
+    trackButton('Show textures on track', () => {
+      TRACKVIEW.colors = false;
+      setShading('material');
+      trackRefresh();
+      buildShelf();
+      closeSheet();
+    }),
     checkInput('Include in KCL', m.kclEnabled !== false, (v) => change({ kclEnabled: v })),
     h('b', { id: 'collisionFlag' }, kclHex(flag) + ' · ' + (m.kclFinish ? 'Finish line (normal road)' : type.name)),
   );
@@ -672,7 +792,7 @@ function buildKMP(body) {
       h(
         'p',
         { class: 'muted' },
-        'In-game testing still needs course.kcl, course_model.brres and a suitable SZS track package. Existing routes/checkpoints are preserved, not fitted to your new mesh. Full checkpoint/route editing and SZS packaging are not included yet.',
+        'In-game testing needs course.kcl, course_model.brres and a suitable SZS track package. Use the SZS editor to replace these files in an existing package. Existing routes/checkpoints are preserved, not fitted to your new mesh. Full checkpoint/route editing is not included yet.',
       ),
     ),
   );
