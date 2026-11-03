@@ -127,7 +127,7 @@ function serializeProject() {
     materials: S.materials,
     images: [...S.images.values()].filter((im) => used.has(im.id)).map((im) => ({ id: im.id, name: im.name, mime: im.mime, data: b64FromBytes(im.bytes) })),
     active: S.active ? S.active.id : null,
-    cursor: S.cursor.toArray(),
+    cursor: S.cursor.toArray(), ruler: normalizeRuler(S.ruler),
     camera: { target: CAM.target.toArray(), yaw: CAM.yaw, pitch: CAM.pitch, dist: CAM.dist, ortho: CAM.ortho },
     settings: { shading: S.shading, selectMode: S.selectMode, pivot: S.pivot, orient: S.orient },
   };
@@ -140,6 +140,7 @@ async function loadProject(data) {
   clearImages();
   S.objects = []; S.materials = [];
   S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
+  S.ruler = normalizeRuler(data.ruler); rulerResetPending();
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
   for (const so of data.objects) {

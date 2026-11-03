@@ -177,6 +177,8 @@ input[type=color] { width: 100%; height: 34px; border: 1px solid var(--line); bo
 .btn.danger { color: var(--danger); }
 .btn svg { width: 18px; height: 18px; }
 .btn:disabled { opacity: .45; }
+.brres-preview { width: 100%; height: 180px; object-fit: contain; image-rendering: pixelated; border-radius: 8px; background: repeating-conic-gradient(#30343d 0% 25%, #232730 0% 50%) 0 0 / 20px 20px; }
+.brres-error { color: var(--danger); margin: 0; }
 .slot { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
 .slot.on { border-color: var(--sel); background: #ff9d3a14; }
 .swatch { width: 30px; height: 30px; border-radius: 7px; border: 1px solid #0006; flex: none; background-size: cover; background-position: center; }
@@ -238,6 +240,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   <main id="work" class="v-3d">
     <section class="pane" id="pane3d">
       <canvas class="view" id="c3d"></canvas>
+      <canvas class="view" id="rulerCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
       <div class="ovl" id="stats"></div>
       <div class="ovl toolcol" id="tools"></div>
       <div class="ovl" id="navwrap"><canvas id="nav" width="184" height="184"></canvas><div class="navbtns" id="navbtns"></div></div>
@@ -263,6 +266,8 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   <input type="file" id="fileProj" accept=".json,application/json" hidden>
   <input type="file" id="fileObj" multiple hidden>
   <input type="file" id="fileMat" multiple hidden>
+  <input type="file" id="fileBRRES" accept=".brres" hidden>
+  <input type="file" id="fileBRRESTexture" accept="image/*" hidden>
 </div>
 
 <script type="importmap">{"imports":{"three":"./vendor/three.module.min.js","three/addons/":"./vendor/addons/"}}</script>
@@ -5431,6 +5436,250 @@ function exportBRRES(scene, opts = {}) {
   return [{ name: (opts.baseName || 'course_model') + '.brres', data: w.finish() }];
 }
 
+// ==== brres_edit.js ====
+// BRRES resource inspection and texture editing. Models and animations stay at their
+// original offsets; larger replacement textures are appended and dictionaries retargeted.
+// Format references: RiiStudio TextureIO.cpp, noclip rres/brres.ts, Dolphin TextureDecoder.
+const WII_TEXTURE_FORMATS = { 0: 'I4', 1: 'I8', 2: 'IA4', 3: 'IA8', 4: 'RGB565', 5: 'RGB5A3', 6: 'RGBA8', 8: 'C4', 9: 'C8', 10: 'C14X2', 14: 'CMPR' };
+const _beBlocks = { 0: [8,8,32], 1: [8,4,32], 2: [8,4,32], 3: [4,4,32], 4: [4,4,32], 5: [4,4,32], 6: [4,4,64], 8: [8,8,32], 9: [8,4,32], 10: [4,4,32], 14: [8,8,32] };
+const _beLimit = 128 * 1024 * 1024;
+function wiiTextureLevelSize(width, height, format) {
+  const block = _beBlocks[format];
+  if (!block) throw new Error('Unsupported Wii texture format: ' + format);
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 4096 || height > 4096) throw new Error('Texture dimensions must be 1–4096');
+  return Math.ceil(width / block[0]) * Math.ceil(height / block[1]) * block[2];
+}
+function _beMipSize(w, h, format, levels) {
+  let size = 0;
+  for (let i = 0; i < levels; i++) { size += wiiTextureLevelSize(w, h, format); w = Math.max(1, w >> 1); h = Math.max(1, h >> 1); }
+  return size;
+}
+function inspectBRRES(input) {
+  const bytes = input instanceof Uint8Array ? Uint8Array.from(input) : new Uint8Array(input).slice();
+  if (bytes.length < 32 || bytes.length > _beLimit) throw new Error('BRRES must be between 32 bytes and 128 MiB');
+  const v = new DataView(bytes.buffer), text = new TextDecoder();
+  let length = bytes.length;
+  const range = (p, n) => { if (!Number.isInteger(p) || p < 0 || n < 0 || p > length - n) throw new Error('Truncated or invalid BRRES offset'); };
+  const magic = (p) => { range(p, 4); return String.fromCharCode(...bytes.subarray(p, p + 4)); };
+  const u32 = (p) => { range(p, 4); return v.getUint32(p); };
+  const relative = (p, base) => { range(p, 4); return base + v.getInt32(p); };
+  const string = (p) => {
+    range(p, 1); let end = p;
+    while (end < length && end - p < 4096 && bytes[end]) end++;
+    if (end === length || end - p === 4096) throw new Error('Invalid BRRES resource name');
+    return text.decode(bytes.subarray(p, end));
+  };
+  if (magic(0) !== 'bres') throw new Error('Choose an uncompressed .brres file');
+  if (v.getUint16(4) !== 0xfeff) throw new Error('Only big-endian Wii BRRES files are supported');
+  length = u32(8); if (length < 32 || length > bytes.length) throw new Error('Truncated BRRES file');
+  const root = v.getUint16(12); range(root, 8);
+  if (magic(root) !== 'root') throw new Error('BRRES root section is missing');
+  const rootSize = u32(root + 4); range(root, rootSize);
+  if (rootSize < 32) throw new Error('Invalid BRRES root size');
+  const dictionary = (p) => {
+    range(p, 24); const size = u32(p), count = u32(p + 4);
+    if (count > 4096 || size < 24 + 16 * count) throw new Error('Invalid BRRES resource dictionary');
+    range(p, size); const entries = [];
+    for (let i = 0; i < count; i++) {
+      const e = p + 24 + i * 16, offset = relative(e + 12, p); range(offset, 4);
+      entries.push({ name: string(relative(e + 8, p)), offset, dictionary: p, pointer: e + 12 });
+    }
+    return entries;
+  };
+  const resources = [], groups = dictionary(root + 8);
+  for (const group of groups) {
+    for (const entry of dictionary(group.offset)) {
+      if (resources.length >= 4096) throw new Error('Too many BRRES resources');
+      const p = entry.offset, type = magic(p), size = u32(p + 4), version = u32(p + 8);
+      if (size < 16) throw new Error('Invalid ' + type + ' section size');
+      range(p, size);
+      const r = { ...entry, group: group.name, type, size, version };
+      if (type === 'TEX0' && [1, 3].includes(version)) {
+        if (size < 52) throw new Error('Invalid TEX0 header');
+        Object.assign(r, { dataOffset: u32(p + 16), width: v.getUint16(p + 28), height: v.getUint16(p + 30), format: u32(p + 32), mipCount: u32(p + 36), minLOD: v.getFloat32(p + 40), maxLOD: v.getFloat32(p + 44) });
+        r.formatName = WII_TEXTURE_FORMATS[r.format] || ('Unknown (' + r.format + ')');
+        r.userData = version === 3 && size >= 56 ? u32(p + 52) : 0;
+        r.sourcePath = u32(p + 48) ? relative(p + 48, p) : 0;
+        if (r.sourcePath) string(r.sourcePath);
+        if (r.mipCount < 1 || r.mipCount > 32 || r.width < 1 || r.height < 1 || r.width > 4096 || r.height > 4096) throw new Error('Invalid TEX0 dimensions or mipmap count');
+        if (_beBlocks[r.format]) {
+          r.encodedSize = _beMipSize(r.width, r.height, r.format, r.mipCount);
+          if (r.dataOffset < (version === 3 ? 56 : 52) || r.dataOffset + r.encodedSize > size) throw new Error('Truncated TEX0 pixel data');
+          r.editable = !r.userData;
+        }
+      } else if (type === 'PLT0' && [1, 3].includes(version)) {
+        if (size < 32) throw new Error('Invalid PLT0 header');
+        Object.assign(r, { dataOffset: u32(p + 16), format: u32(p + 24), entries: v.getUint16(p + 28) });
+        if (r.dataOffset < 32 || r.dataOffset + r.entries * 2 > size) throw new Error('Truncated palette');
+      } else if (type === 'MDL0' && [8, 9, 10, 11].includes(version)) {
+        const slots = version >= 10 ? 13 : 11, info = p + 16 + slots * 4 + (version >= 11 ? 4 : 0) + 4;
+        if (info + 24 > p + size) throw new Error('Truncated MDL0 header');
+        r.vertices = u32(info + 16); r.polygons = u32(info + 20);
+        const materialField = p + 16 + (version >= 10 ? 8 : 6) * 4;
+        r.materials = u32(materialField) ? dictionary(relative(materialField, p)).map((x) => x.name) : [];
+      }
+      resources.push(r);
+    }
+  }
+  // Refuse ambiguous overlaps before allowing any in-place edits.
+  const sections = [...new Map(resources.map((r) => [r.offset, r])).values()].sort((a, b) => a.offset - b.offset);
+  let end = root + rootSize;
+  for (const r of sections) { if (r.offset < end) throw new Error('Overlapping BRRES sections are not supported'); end = r.offset + r.size; }
+  return { bytes, version: v.getUint16(6), length, sectionCount: v.getUint16(14), resources, textures: resources.filter((r) => r.type === 'TEX0'), palettes: resources.filter((r) => r.type === 'PLT0') };
+}
+function _be565(n) { const r = n >> 11, g = (n >> 5) & 63, b = n & 31; return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2), 255]; }
+function _be5a3(n) {
+  if (n & 32768) { const r = (n >> 10) & 31, g = (n >> 5) & 31, b = n & 31; return [(r << 3) | (r >> 2), (g << 3) | (g >> 2), (b << 3) | (b >> 2), 255]; }
+  const a = n >> 12; return [((n >> 8) & 15) * 17, ((n >> 4) & 15) * 17, (n & 15) * 17, (a << 5) | (a << 2) | (a >> 1)];
+}
+function decodeBRRESTexture(archive, texture, palette = null, level = 0) {
+  if (!archive.textures.includes(texture)) throw new Error('Texture does not belong to this archive');
+  const f = texture.format, block = _beBlocks[f];
+  if (!block || !texture.encodedSize) throw new Error('This texture version or format cannot be previewed');
+  if (!Number.isInteger(level) || level < 0 || level >= texture.mipCount) throw new Error('Invalid mipmap level');
+  let w = texture.width, h = texture.height, offset = texture.offset + texture.dataOffset;
+  for (let i = 0; i < level; i++) { offset += wiiTextureLevelSize(w, h, f); w = Math.max(1, w >> 1); h = Math.max(1, h >> 1); }
+  const bytes = archive.bytes, view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength), rgba = new Uint8Array(w * h * 4);
+  let colors;
+  if ([8, 9, 10].includes(f)) {
+    palette ||= archive.palettes.find((p) => p.name === texture.name);
+    if (!palette || !archive.palettes.includes(palette) || ![0, 1, 2].includes(palette.format)) throw new Error('Select the matching palette to preview this indexed texture');
+    colors = Array.from({ length: palette.entries }, (_, i) => { const n = view.getUint16(palette.offset + palette.dataOffset + i * 2); return palette.format === 1 ? _be565(n) : palette.format === 2 ? _be5a3(n) : [n & 255, n & 255, n & 255, n >> 8]; });
+  }
+  const put = (x, y, c) => { if (x < w && y < h) rgba.set(c, (y * w + x) * 4); };
+  for (let by = 0; by < h; by += block[1]) for (let bx = 0; bx < w; bx += block[0], offset += block[2]) {
+    if (f === 14) {
+      for (let sub = 0; sub < 4; sub++) {
+        const p = offset + sub * 8, a = view.getUint16(p), b = view.getUint16(p + 2), ca = _be565(a), cb = _be565(b);
+        const mix = (wa, wb, denom, alpha) => ca.map((c, k) => k === 3 ? alpha : Math.floor((c * wa + cb[k] * wb) / denom));
+        // Wii's CMPR interpolator uses 5/8 and 3/8 weights (Dolphin DXTBlend).
+        const cs = [ca, cb, a > b ? mix(5,3,8,255) : mix(1,1,2,255), a > b ? mix(3,5,8,255) : mix(1,1,2,0)];
+        for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) put(bx + (sub % 2) * 4 + x, by + (sub >> 1) * 4 + y, cs[(bytes[p + 4 + y] >> (6 - x * 2)) & 3]);
+      }
+      continue;
+    }
+    for (let y = 0; y < block[1]; y++) for (let x = 0; x < block[0]; x++) {
+      const i = y * block[0] + x, n = bytes[offset + i]; let c;
+      if (f === 0) { const z = ((bytes[offset + (i >> 1)] >> (i % 2 ? 0 : 4)) & 15) * 17; c = [z,z,z,z]; }
+      else if (f === 1) c = [n,n,n,n];
+      else if (f === 2) { const z = (n & 15) * 17; c = [z,z,z,(n >> 4) * 17]; }
+      else if (f === 3) { const z = bytes[offset + i * 2 + 1]; c = [z,z,z,bytes[offset + i * 2]]; }
+      else if (f === 4) c = _be565(view.getUint16(offset + i * 2));
+      else if (f === 5) c = _be5a3(view.getUint16(offset + i * 2));
+      else if (f === 6) c = [bytes[offset + i * 2 + 1],bytes[offset + i * 2 + 32],bytes[offset + i * 2 + 33],bytes[offset + i * 2]];
+      else { const index = f === 8 ? (bytes[offset + (i >> 1)] >> (i % 2 ? 0 : 4)) & 15 : f === 9 ? n : view.getUint16(offset + i * 2) & 16383; c = colors[index]; if (!c) throw new Error('Texture references a missing palette entry'); }
+      put(bx + x, by + y, c);
+    }
+  }
+  return { width: w, height: h, rgba };
+}
+function encodeWiiTexture(rgba, width, height, format = 6) {
+  if (![0,1,2,3,4,5,6].includes(format)) throw new Error('Choose an uncompressed output format');
+  if (!rgba || rgba.length !== width * height * 4) throw new Error('Invalid RGBA pixels');
+  const out = new Uint8Array(wiiTextureLevelSize(width, height, format)), view = new DataView(out.buffer), [bw,bh,bs] = _beBlocks[format];
+  let offset = 0;
+  for (let by = 0; by < height; by += bh) for (let bx = 0; bx < width; bx += bw, offset += bs) {
+    for (let y = 0; y < bh; y++) for (let x = 0; x < bw; x++) {
+      const q = (Math.min(by+y,height-1) * width + Math.min(bx+x,width-1)) * 4, i = y * bw + x;
+      const r = rgba[q], g = rgba[q+1], b = rgba[q+2], a = rgba[q+3], intensity = Math.round(.299*r + .587*g + .114*b);
+      if (format === 0) out[offset+(i>>1)] |= (intensity >> 4) << (i % 2 ? 0 : 4);
+      else if (format === 1) out[offset+i] = intensity;
+      else if (format === 2) out[offset+i] = (a & 240) | (intensity >> 4);
+      else if (format === 3) { out[offset+i*2] = a; out[offset+i*2+1] = intensity; }
+      else if (format === 4) view.setUint16(offset+i*2, ((r>>3)<<11) | ((g>>2)<<5) | (b>>3));
+      else if (format === 5) view.setUint16(offset+i*2, a >= 224 ? 32768 | ((r>>3)<<10) | ((g>>3)<<5) | (b>>3) : ((a>>5)<<12) | ((r>>4)<<8) | ((g>>4)<<4) | (b>>4));
+      else { out[offset+i*2] = a; out[offset+i*2+1] = r; out[offset+i*2+32] = g; out[offset+i*2+33] = b; }
+    }
+  }
+  return out;
+}
+function resizeTexturePixels(image, width, height) {
+  if (![width,height].every((n) => Number.isInteger(n) && n >= 1 && n <= 1024 && (n & (n-1)) === 0)) throw new Error('Choose power-of-two dimensions from 1 to 1024');
+  if (!image || image.rgba?.length !== image.width * image.height * 4) throw new Error('Invalid source image');
+  const rgba = new Uint8Array(width * height * 4), sw = image.width, sh = image.height;
+  // Area resampling in premultiplied alpha avoids dark/colored fringes at cutouts.
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    const x0 = x*sw/width, x1 = (x+1)*sw/width, y0 = y*sh/height, y1 = (y+1)*sh/height;
+    let a = 0, r = 0, g = 0, b = 0, weight = 0;
+    for (let sy = Math.floor(y0); sy < Math.ceil(y1); sy++) for (let sx = Math.floor(x0); sx < Math.ceil(x1); sx++) {
+      const w = (Math.min(x1,sx+1)-Math.max(x0,sx)) * (Math.min(y1,sy+1)-Math.max(y0,sy)), p = (sy*sw+sx)*4, alpha = image.rgba[p+3]*w;
+      a += alpha; r += image.rgba[p]*alpha; g += image.rgba[p+1]*alpha; b += image.rgba[p+2]*alpha; weight += w;
+    }
+    const p = (y*width+x)*4;
+    rgba[p] = a ? Math.round(r/a) : 0; rgba[p+1] = a ? Math.round(g/a) : 0; rgba[p+2] = a ? Math.round(b/a) : 0; rgba[p+3] = Math.round(a/weight);
+  }
+  return { width, height, rgba };
+}
+function prepareBRRESTexture(image, width, height, format = 6, mipCount = 1) {
+  let current = resizeTexturePixels(image, width, height);
+  const maxLevels = 1 + Math.floor(Math.log2(Math.max(width, height)));
+  if (!Number.isInteger(mipCount) || mipCount < 1 || mipCount > maxLevels) throw new Error('Invalid mipmap count');
+  const data = new Uint8Array(_beMipSize(width, height, format, mipCount)); let offset = 0;
+  for (let i = 0; i < mipCount; i++) {
+    const encoded = encodeWiiTexture(current.rgba, current.width, current.height, format); data.set(encoded, offset); offset += encoded.length;
+    if (i + 1 < mipCount) current = resizeTexturePixels(current, Math.max(1,current.width>>1), Math.max(1,current.height>>1));
+  }
+  return { width, height, format, mipCount, data };
+}
+function saveBRRESEdits(archive, changes) {
+  const edits = [...changes.entries()], appended = [], align = (n) => Math.ceil(n/32)*32;
+  let length = archive.bytes.length;
+  for (const [offset, edit] of edits) {
+    const t = archive.textures.find((r) => r.offset === offset);
+    if (!t?.editable) throw new Error('This texture has unsupported metadata and is read-only');
+    if (![edit.width,edit.height].every((n) => Number.isInteger(n) && n >= 1 && n <= 1024 && (n & (n-1)) === 0) || ![0,1,2,3,4,5,6].includes(edit.format) || !Number.isInteger(edit.mipCount) || edit.mipCount < 1 || edit.mipCount > 1+Math.log2(Math.max(edit.width,edit.height))) throw new Error('Invalid texture edit');
+    if (!(edit.data instanceof Uint8Array) || edit.data.length !== _beMipSize(edit.width,edit.height,edit.format,edit.mipCount)) throw new Error('Invalid encoded texture data');
+    let target = t.offset, name = null;
+    if (edit.data.length > t.encodedSize) {
+      target = align(length); name = new TextEncoder().encode(t.name);
+      length = align(target + 64 + edit.data.length + 4 + name.length + 1);
+    }
+    appended.push({ t, edit, target, name });
+  }
+  if (length > _beLimit) throw new Error('Edited BRRES would exceed 128 MiB');
+  const out = new Uint8Array(length); out.set(archive.bytes); const v = new DataView(out.buffer);
+  for (const { t, edit, target: p, name } of appended) {
+    let dataOffset = t.dataOffset;
+    if (name) {
+      out.set(archive.bytes.subarray(t.offset,t.offset+52),p); dataOffset = 64;
+      v.setUint32(p+4,64+edit.data.length); v.setUint32(p+8,3); v.setInt32(p+12,-p); v.setUint32(p+16,64);
+      const n = p + 64 + edit.data.length;
+      v.setUint32(n,name.length); out.set(name,n+4); v.setInt32(p+20,n+4-p);
+      v.setInt32(p+48,t.sourcePath ? t.sourcePath-p : 0); v.setUint32(p+52,0);
+      // All aliases must continue pointing to the same replacement resource.
+      for (const alias of archive.textures.filter((x) => x.offset === t.offset)) v.setInt32(alias.pointer,p-alias.dictionary);
+    }
+    v.setUint32(p+24,0); v.setUint16(p+28,edit.width); v.setUint16(p+30,edit.height); v.setUint32(p+32,edit.format); v.setUint32(p+36,edit.mipCount); v.setFloat32(p+40,0); v.setFloat32(p+44,edit.mipCount-1);
+    out.set(edit.data,p+dataOffset);
+  }
+  if (edits.length) v.setUint32(8,length);
+  return out;
+}
+
+// ==== measure.js ====
+// Measurement coordinates are world-space snapshots, independent of object selection.
+function normalizeRuler(value = {}) {
+  const point = (p) => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite);
+  return {
+    metersPerUnit: Number.isFinite(value?.metersPerUnit) && value.metersPerUnit > 0 ? value.metersPerUnit : 1,
+    unit: ['m', 'cm', 'mm', 'ft'].includes(value?.unit) ? value.unit : 'm',
+    snap: value?.snap !== false,
+    measurements: (Array.isArray(value?.measurements) ? value.measurements : []).filter((m) => point(m?.a) && point(m?.b)).slice(0, 200).map((m) => ({ a: m.a.slice(), b: m.b.slice() })),
+  };
+}
+function measurementMeters(a, b, metersPerUnit = 1) {
+  return Math.hypot(...a.map((x, i) => b[i] - x)) * metersPerUnit;
+}
+function formatMeasurement(meters, unit = 'm') {
+  const factor = { m: 1, cm: 100, mm: 1000, ft: 1 / .3048 }[unit] || 1;
+  const value = meters * factor;
+  return (value !== 0 && Math.abs(value) < .001 ? value.toExponential(2) : String(+value.toFixed(3))) + ' ' + unit;
+}
+// Screen-space interpolation must account for perspective before snapping in 3D.
+function perspectiveEdgeParameter(screenT, clipWA, clipWB) {
+  return (screenT / clipWB) / ((1 - screenT) / clipWA + screenT / clipWB);
+}
+
 // ==== app_core.js ====
 // ============================================================================
 // app_core.js — renderer, scene objects, overlays, camera, picking, selection, undo
@@ -5462,6 +5711,7 @@ function h(tag, attrs = {}, ...kids) {
 
 // ---------- icons ----------
 const ICONS = {
+  ruler: '<path d="m3 16 13-13 5 5L8 21zM7 12l2 2m2-6 2 2m2-6 2 2"/>',
   menu: '<path d="M4 6.5h16M4 12h16M4 17.5h16"/>',
   undo: '<path d="M9 13.5 4.5 9 9 4.5"/><path d="M4.5 9H14a5.5 5.5 0 0 1 0 11h-3"/>',
   redo: '<path d="M15 13.5 19.5 9 15 4.5"/><path d="M19.5 9H10a5.5 5.5 0 0 0 0 11h3"/>',
@@ -5543,7 +5793,7 @@ const S = {
   snap: false, snapMove: 0.1, snapRot: 5, snapScale: 0.1,
   prop: false, propRadius: 1, propFalloff: 'smooth',
   shading: 'solid', xray: false, faceOrient: false, view: '3d',
-  cursor: new THREE.Vector3(),
+  cursor: new THREE.Vector3(), ruler: normalizeRuler(),
   uvSel: new Set(), uvTool: 'select', uvStretch: false,
 };
 let _nid = 1, _matNid = 1, _imgNid = 1;
@@ -5788,7 +6038,7 @@ function rebuildObject(o) {
       o.modifierError = e.message;
     }
   }
-  o.renderMesh = m;
+  o.renderMesh = m; o.rulerEdges = null;
   const nSlots = Math.max(1, o.materials.length);
   const lists = Array.from({ length: nSlots }, () => []);
   for (let fi = 0; fi < m.faces.length; fi++) {
@@ -6290,7 +6540,7 @@ function snapshot() {
     })),
     materials: S.materials.map((m) => ({ ...m })),
     active: S.active ? S.active.id : null, mode: S.mode, selectMode: S.selectMode,
-    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel),
+    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel), ruler: normalizeRuler(S.ruler),
   };
 }
 function restore(snap) {
@@ -6318,6 +6568,7 @@ function restore(snap) {
   S.mode = snap.mode === 'edit' && S.active ? 'edit' : 'object';
   S.selectMode = snap.selectMode;
   S.cursor.fromArray(snap.cursor);
+  S.ruler = normalizeRuler(snap.ruler); rulerResetPending();
   S.uvSel = new Set(snap.uvSel);
   for (const o of S.objects) rebuildObject(o);
   refreshOriginDots();
@@ -6392,6 +6643,7 @@ function frame(now) {
   dirty = false;
   renderer.render(scene, camera);
   drawNav();
+  drawRuler();
 }
 
 // ==== app_transform.js ====
@@ -8112,7 +8364,7 @@ function serializeProject() {
     materials: S.materials,
     images: [...S.images.values()].filter((im) => used.has(im.id)).map((im) => ({ id: im.id, name: im.name, mime: im.mime, data: b64FromBytes(im.bytes) })),
     active: S.active ? S.active.id : null,
-    cursor: S.cursor.toArray(),
+    cursor: S.cursor.toArray(), ruler: normalizeRuler(S.ruler),
     camera: { target: CAM.target.toArray(), yaw: CAM.yaw, pitch: CAM.pitch, dist: CAM.dist, ortho: CAM.ortho },
     settings: { shading: S.shading, selectMode: S.selectMode, pivot: S.pivot, orient: S.orient },
   };
@@ -8125,6 +8377,7 @@ async function loadProject(data) {
   clearImages();
   S.objects = []; S.materials = [];
   S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
+  S.ruler = normalizeRuler(data.ruler); rulerResetPending();
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
   for (const so of data.objects) {
@@ -8315,6 +8568,228 @@ async function importMaterialFiles(files) {
   return { count, warnings };
 }
 
+// ==== app_ruler.js ====
+// Ruler: tap two endpoints, with vertex/edge snapping enabled by default.
+const RULER = { first: null, hover: null };
+function rulerResetPending() { RULER.first = null; RULER.hover = null; requestRender(); }
+function rulerActivate() {
+  if (TF.active) tfCancel(); if (PM.active) pmCancel();
+  S.tool = 'ruler'; S.pendingTap = null; rulerResetPending(); closeSheet();
+  buildTools(); buildSubbar(); gizmoSync(); hint('Ruler · tap the first point · drag to orbit');
+}
+function rulerDone() { S.tool = 'select'; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); }
+function rulerPick(x, y, radius = 18) {
+  const objects = S.objects.filter((o) => o.visible), nodes = objects.map((o) => o.meshNode).filter(Boolean);
+  scene.updateMatrixWorld(true);
+  const { w, h: height } = viewSize(), vp = new THREE.Matrix4().multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+  const projected = (point) => {
+    const p = new THREE.Vector4(...point, 1).applyMatrix4(vp);
+    return { x: (p.x/p.w*.5+.5)*w, y: (-p.y/p.w*.5+.5)*height, w: p.w, z: p.z/p.w, valid: p.w > 0 && p.z/p.w >= -1 && p.z/p.w <= 1 };
+  };
+  const visible = (candidate) => {
+    if (S.xray || S.shading === 'wire') return true;
+    const ray = screenRay(candidate.screen.x,candidate.screen.y), hit = ray.intersectObjects(nodes,false)[0];
+    return !hit || ray.ray.origin.distanceTo(new THREE.Vector3(...candidate.point)) <= hit.distance + Math.max(.0001,hit.distance*.0001);
+  };
+  if (S.ruler.snap) {
+    const vertices = [], edges = [];
+    for (const o of objects) {
+      const m = o.renderMesh || o.mesh;
+      if (!o.rulerEdges) o.rulerEdges = topo(m).edges;
+      const world = m.verts.map((p) => new THREE.Vector3(...p).applyMatrix4(o.node.matrixWorld).toArray()), screen = world.map(projected);
+      screen.forEach((p, i) => {
+        const distance = Math.hypot(p.x-x,p.y-y);
+        if (p.valid && distance <= radius) vertices.push({ point: world[i], screen: p, kind: 'Vertex', distance });
+      });
+      for (const [ai, bi] of o.rulerEdges) {
+        const a = screen[ai], b = screen[bi]; if (!a?.valid || !b?.valid) continue;
+        const dx = b.x-a.x, dy = b.y-a.y, len = dx*dx+dy*dy; if (len < .01) continue;
+        const t = clamp(((x-a.x)*dx+(y-a.y)*dy)/len,0,1), sx = a.x+t*dx, sy = a.y+t*dy, distance = Math.hypot(x-sx,y-sy);
+        if (distance > radius) continue;
+        const u = perspectiveEdgeParameter(t,a.w,b.w), point = world[ai].map((v,k) => v+(world[bi][k]-v)*u);
+        edges.push({ point, screen: projected(point), kind: 'Edge', distance });
+      }
+    }
+    const order = (a,b) => a.distance-b.distance || a.screen.z-b.screen.z;
+    for (const candidates of [vertices,edges]) for (const c of candidates.sort(order)) if (visible(c)) return c;
+  }
+  const ray = screenRay(x,y), hit = ray.intersectObjects(nodes,false)[0];
+  if (hit) return { point: hit.point.toArray(), kind: 'Surface' };
+  const point = ray.ray.intersectPlane(new THREE.Plane(new THREE.Vector3(0,0,1),-S.cursor.z),new THREE.Vector3());
+  return point ? { point: point.toArray(), kind: 'Grid plane' } : null;
+}
+function rulerTap(x, y, radius) {
+  const pick = rulerPick(x,y,radius); if (!pick) { toast('No surface here. Orbit to see the grid.'); return; }
+  RULER.hover = pick;
+  if (!RULER.first) { RULER.first = pick; hint(pick.kind + ' snapped · tap the second point'); }
+  else {
+    if (S.ruler.measurements.length >= 200) { toast('Clear a measurement before adding another',true); return; }
+    const m = { a: RULER.first.point.slice(), b: pick.point.slice() }; S.ruler.measurements.push(m); RULER.first = null;
+    pushUndo('Measure'); hint(formatMeasurement(measurementMeters(m.a,m.b,S.ruler.metersPerUnit),S.ruler.unit) + ' · tap to measure again');
+  }
+  requestRender();
+}
+function drawRuler() {
+  const canvas = $('#rulerCanvas'), ctx = canvas.getContext('2d'), { w,h: height } = viewSize(), dpr = Math.min(devicePixelRatio || 1,2);
+  if (canvas.width !== Math.round(w*dpr) || canvas.height !== Math.round(height*dpr)) { canvas.width = Math.round(w*dpr); canvas.height = Math.round(height*dpr); }
+  ctx.setTransform(dpr,0,0,dpr,0,0); ctx.clearRect(0,0,w,height);
+  const screen = (p) => { const v = new THREE.Vector3(...p), s = toScreen(v); return s.z >= -1 && s.z <= 1 ? s : null; };
+  const dot = (p, color) => { ctx.beginPath(); ctx.arc(p.x,p.y,4,0,Math.PI*2); ctx.fillStyle = '#171b22'; ctx.fill(); ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.stroke(); };
+  const label = (text,x,y,color) => {
+    ctx.font = '600 12px -apple-system, system-ui, sans-serif'; const width = ctx.measureText(text).width+16;
+    x = clamp(x-width/2,4,Math.max(4,w-width-4)); y = clamp(y-27,4,height-26);
+    ctx.fillStyle = '#131820ed'; ctx.fillRect(x,y,width,23); ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.strokeRect(x,y,width,23);
+    ctx.fillStyle = color; ctx.textAlign = 'left'; ctx.textBaseline = 'middle'; ctx.fillText(text,x+8,y+12);
+  };
+  const line = (a,b,preview = false) => {
+    const p = screen(a), q = screen(b); if (!p || !q) return;
+    const color = preview ? '#8be4fa' : '#ffd27b';
+    ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(q.x,q.y); ctx.strokeStyle = '#10151c'; ctx.lineWidth = 4; ctx.stroke();
+    ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(preview ? [5,4] : []); ctx.stroke(); ctx.setLineDash([]);
+    dot(p,color); dot(q,color); label(formatMeasurement(measurementMeters(a,b,S.ruler.metersPerUnit),S.ruler.unit),(p.x+q.x)/2,(p.y+q.y)/2,color);
+  };
+  for (const m of S.ruler.measurements) line(m.a,m.b);
+  if (S.tool !== 'ruler') return;
+  if (RULER.first && RULER.hover) line(RULER.first.point,RULER.hover.point,true);
+  if (RULER.hover) { const p = screen(RULER.hover.point); if (p) { dot(p,'#8be4fa'); label(RULER.hover.kind,p.x,p.y+55,'#8be4fa'); } }
+}
+function openRuler() {
+  openSheet('Ruler · Measurements',(body) => {
+    const change = (fn) => { fn(); pushUndo('Ruler settings'); buildSubbar(); requestRender(); refreshSheet(true); };
+    body.append(h('p',{class:'muted'},'Tap two points with the ruler. Vertices and edges snap by default; empty space uses the grid at the 3D cursor’s height.'));
+    body.append(h('button',{class:'btn primary',onclick:rulerActivate},'New measurement'));
+    body.append(field('Display unit',selectInput(S.ruler.unit,[['m','Meters (m)'],['cm','Centimeters (cm)'],['mm','Millimeters (mm)'],['ft','Feet (ft)']],(v) => change(() => S.ruler.unit=v),'Ruler unit')));
+    body.append(field('Meters per unit',numInput(S.ruler.metersPerUnit,(v) => change(() => S.ruler.metersPerUnit=v),{min:.000001,max:1000000,digits:6,label:'Meters per modeling unit'})));
+    body.append(checkInput('Snap to vertices and edges',S.ruler.snap,(v) => change(() => S.ruler.snap=v)));
+    body.append(h('p',{class:'muted'},'Default: 1 modeling unit = 1 meter. For centimeter-based coordinates use 0.01. Measurements store fixed world points; moving a model does not move them.'));
+    const card = h('div',{class:'card'},h('h3',{},'Saved measurements'));
+    if (!S.ruler.measurements.length) card.append(h('span',{class:'muted'},'No measurements yet.'));
+    S.ruler.measurements.forEach((m,i) => card.append(h('div',{class:'row'},h('span',{style:{flex:'1'}},`${i+1}. ${formatMeasurement(measurementMeters(m.a,m.b,S.ruler.metersPerUnit),S.ruler.unit)}`),h('button',{class:'btn','aria-label':`Delete measurement ${i+1}`,onclick:() => change(() => S.ruler.measurements.splice(i,1))},'Delete'))));
+    if (S.ruler.measurements.length) card.append(h('button',{class:'btn',onclick:() => change(() => { S.ruler.measurements=[]; rulerResetPending(); })},'Clear measurements'));
+    body.append(card);
+  },{panel:true,kind:'ruler'});
+}
+
+// ==== app_brres.js ====
+// Standalone archive editor: opening a BRRES does not replace the modeling scene.
+const BRED = { archive: null, name: '', selected: null, changes: new Map(), palettes: new Map(), preview: null, replacement: null, imageTarget: null, error: '' };
+function loadBRRESEditor(bytes, name = 'course_model.brres') {
+  const archive = inspectBRRES(bytes); // Validate before replacing an open archive.
+  Object.assign(BRED,{archive,name,selected:(archive.textures[0] || archive.resources[0])?.offset ?? null,changes:new Map(),palettes:new Map(),preview:null,replacement:null,error:''});
+  openBRRESEditor(); return archive;
+}
+function brresImage(texture, level = 0) {
+  const edit = BRED.changes.get(texture.offset);
+  if (edit) {
+    const t = { ...edit,offset:0,dataOffset:0,encodedSize:edit.data.length };
+    return decodeBRRESTexture({bytes:edit.data,textures:[t],palettes:[]},t,null,level);
+  }
+  const palette = BRED.archive.palettes.find((p) => p.offset === BRED.palettes.get(texture.offset));
+  return decodeBRRESTexture(BRED.archive,texture,palette,level);
+}
+function brresCanvas(image) {
+  const canvas = h('canvas',{class:'brres-preview',width:image.width,height:image.height,'aria-label':'Texture preview'});
+  canvas.getContext('2d').putImageData(new ImageData(new Uint8ClampedArray(image.rgba),image.width,image.height),0,0);
+  return canvas;
+}
+function brresSize(bytes) { return bytes >= 1048576 ? (bytes/1048576).toFixed(2)+' MiB' : (bytes/1024).toFixed(1)+' KiB'; }
+function openBRRESEditor() { openSheet('BRRES Editor',buildBRRESEditor,{panel:true,kind:'brres'}); }
+function brresEditorError(error) { BRED.error = error.message || String(error); if (SHEET.kind === 'brres') refreshSheet(true); toast(BRED.error,true); }
+function buildBRRESEditor(body) {
+  body.append(h('div',{class:'row'},h('button',{class:'btn primary',onclick:() => $('#fileBRRES').click()},'Open BRRES…'),h('button',{class:'btn',onclick:() => {
+    try { const file = runExport('brres',{baseName:'course_model',scale:1,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
+  }},'Use current scene')));
+  if (BRED.error) body.append(h('p',{class:'brres-error',role:'alert'},BRED.error));
+  const a = BRED.archive;
+  if (!a) {
+    body.append(h('p',{class:'muted'},'Open an uncompressed Wii .brres to inspect models, animations, palettes and textures. Resize, replace or convert textures, then save a BRRES copy.'));
+    body.append(h('p',{class:'muted'},'This basic editor changes textures. Geometry, material/shader definitions and animations in opened files are preserved. Use PocketMesh’s modeling tools for new models.'));
+    return;
+  }
+  const counts = new Map(); for (const r of a.resources) counts.set(r.type,(counts.get(r.type)||0)+1);
+  body.append(h('div',{class:'card'},h('strong',{style:{overflowWrap:'anywhere'}},BRED.name),h('span',{class:'muted'},`BRRES v${a.version} · Big endian · ${brresSize(a.bytes.length)}`),h('span',{class:'muted'},[...counts].map(([type,n]) => `${n} ${type}`).join(' · ') || 'Empty archive')));
+  const exportButton = h('button',{class:'btn primary',onclick:() => {
+    try { const bytes = saveBRRESEdits(a,BRED.changes); shareOrDownload(safeFileName(BRED.name.replace(/\.brres$/i,''))+'_edited.brres',bytes); } catch (e) { brresEditorError(e); }
+  }},'Save & Send BRRES…');
+  body.append(h('div',{class:'row'},exportButton,h('span',{class:'muted','aria-live':'polite'},`${BRED.changes.size} edited texture${BRED.changes.size === 1 ? '' : 's'}`)));
+  if (!a.resources.length) return;
+  body.append(field('Resource',selectInput(BRED.selected,a.resources.map((r) => [r.offset,`${r.type} · ${r.name}${BRED.changes.has(r.offset) ? ' *' : ''}`]),(value) => { BRED.selected=Number(value); BRED.preview=null; BRED.replacement=null; BRED.error=''; refreshSheet(true); },'BRRES resource')));
+  const t = a.resources.find((r) => r.offset === BRED.selected); if (!t) return;
+  const card = h('div',{class:'card'},h('h3',{style:{overflowWrap:'anywhere'}},t.type+' · '+t.name),h('span',{class:'muted'},`${t.group} · Version ${t.version} · ${brresSize(t.size)}`));
+  body.append(card);
+  if (t.type !== 'TEX0') {
+    if (t.type === 'MDL0' && t.vertices !== undefined) {
+      card.append(h('p',{class:'muted'},`${t.vertices.toLocaleString()} vertices · ${t.polygons.toLocaleString()} polygons`));
+      card.append(h('h3',{},'Materials'),h('p',{class:'muted',style:{overflowWrap:'anywhere'}},t.materials.join(', ') || 'None'));
+    }
+    if (t.type === 'PLT0' && t.entries !== undefined) card.append(h('p',{class:'muted'},`${t.entries} palette colors · ${['IA8','RGB565','RGB5A3'][t.format] || 'Unknown format '+t.format}`));
+    card.append(h('p',{class:'muted'},'Inspected only. This resource stays unchanged when you save texture edits.'));
+    return;
+  }
+  if (t.width === undefined) { card.append(h('p',{class:'muted'},'This TEX0 version is not supported for preview or editing.')); return; }
+  const edit = BRED.changes.get(t.offset), current = edit || t;
+  card.append(h('span',{},`${current.width} × ${current.height} px · ${WII_TEXTURE_FORMATS[current.format] || t.formatName} (${current.format})`),h('span',{class:'muted'},`${current.mipCount} mip level${current.mipCount === 1 ? '' : 's'} · ${brresSize(edit?.data.length || t.encodedSize || 0)} encoded pixels`));
+  if (edit) card.append(h('span',{class:'muted'},`Original: ${t.width} × ${t.height} · ${t.formatName} · ${t.mipCount} levels`));
+  if ([8,9,10].includes(t.format) && !edit) {
+    const matching = a.palettes.find((p) => p.name === t.name);
+    card.append(field('Palette',selectInput(BRED.palettes.get(t.offset) ?? matching?.offset ?? '',[['','Choose palette…'],...a.palettes.map((p) => [p.offset,p.name])],(value) => { BRED.palettes.set(t.offset,Number(value)); BRED.preview=null; refreshSheet(true); },'Texture palette')));
+  }
+  let image;
+  try {
+    const key = `${t.offset}:${BRED.palettes.get(t.offset)}:${!!edit}`;
+    if (BRED.preview?.key !== key) BRED.preview = {key,image:brresImage(t)};
+    image = BRED.replacement?.offset === t.offset ? BRED.replacement.image : BRED.preview.image;
+    card.append(brresCanvas(image));
+    if (BRED.replacement?.offset === t.offset) card.append(h('strong',{},'Replacement ready — apply changes below.'));
+  } catch (e) { card.append(h('p',{class:'muted'},e.message)); }
+  if (!t.editable) { card.append(h('p',{class:'muted'},'This texture has an unsupported format or user metadata. It is read-only and will be preserved.')); return; }
+  const buttons = h('div',{class:'row'},h('button',{class:'btn',onclick:() => { BRED.imageTarget={archive:a,offset:t.offset}; $('#fileBRRESTexture').click(); }},'Replace image…'));
+  if (image) buttons.append(h('button',{class:'btn',onclick:() => shareOrDownload(safeFileName(t.name)+'.png',canvasBytes(brresCanvas(image),'image/png'))},'Export PNG'));
+  if (edit || BRED.replacement) buttons.append(h('button',{class:'btn',onclick:() => { BRED.changes.delete(t.offset); BRED.replacement=null; BRED.preview=null; BRED.error=''; refreshSheet(true); }},'Revert texture'));
+  card.append(buttons);
+  if (!image) return;
+  const sizes = Array.from({length:11},(_,i) => [2**i,String(2**i)]), pot = (n) => 2**Math.floor(Math.log2(Math.min(1024,n)));
+  let width = pot(image.width), height = pot(image.height), format = [0,1,2,3,4,5,6].includes(current.format) ? current.format : 6, mipMode = current.mipCount > 1 ? 'keep' : 'none';
+  const widthInput = selectInput(width,sizes,(v) => { width=+v; updateEstimate(); },'Texture width');
+  const heightInput = selectInput(height,sizes,(v) => { height=+v; updateEstimate(); },'Texture height');
+  card.append(field('Width (px)',widthInput),field('Height (px)',heightInput));
+  card.append(field('Fit longest edge',selectInput('',[['','Choose size…'],...[64,128,256,512,1024].map((n) => [n,n+' px'])],(value) => {
+    if (!value) return; const scale = +value / Math.max(image.width,image.height);
+    width = Math.max(1,pot(image.width*scale)); height = Math.max(1,pot(image.height*scale)); widthInput.value=String(width); heightInput.value=String(height); updateEstimate();
+  },'Fit texture size')));
+  card.append(field('Output format',selectInput(format,[[6,'RGBA8 · full color + alpha'],[5,'RGB5A3 · color + alpha'],[4,'RGB565 · opaque color'],[3,'IA8 · gray + alpha'],[2,'IA4 · compact gray + alpha'],[1,'I8 · intensity = alpha'],[0,'I4 · intensity = alpha']],(v) => { format=+v; updateEstimate(); },'Texture format')));
+  card.append(field('Mipmaps',selectInput(mipMode,[['keep','Keep count · rebuild'],['full','Full mip chain'],['none','Base level only']],(v) => { mipMode=v; updateEstimate(); },'Texture mipmaps')));
+  const estimate = h('p',{class:'muted','aria-live':'polite'}), maxLevels = () => 1+Math.log2(Math.max(width,height));
+  const levels = () => mipMode === 'full' ? maxLevels() : mipMode === 'none' ? 1 : Math.min(current.mipCount,maxLevels());
+  function updateEstimate() {
+    let w=width, hh=height, bytes=0; for (let i=0;i<levels();i++) { bytes+=wiiTextureLevelSize(w,hh,format); w=Math.max(1,w>>1); hh=Math.max(1,hh>>1); }
+    estimate.textContent = `${width} × ${height} · ${WII_TEXTURE_FORMATS[format]} · ${levels()} levels · ${brresSize(bytes)}. `+(format === 4 ? 'Alpha will be removed.' : format === 5 ? 'Color and alpha precision will be reduced.' : format < 4 ? 'Converts color to grayscale.' : 'Full color and alpha.');
+  }
+  updateEstimate(); card.append(estimate);
+  if ([8,9,10,14].includes(t.format)) card.append(h('p',{class:'muted'},'CMPR and indexed textures can be previewed. Applying changes converts them to the output format above. Compression and palette encoding are not available yet.'));
+  card.append(h('button',{class:'btn primary',onclick:() => {
+    try { BRED.changes.set(t.offset,prepareBRRESTexture(image,width,height,format,levels())); BRED.replacement=null; BRED.preview=null; BRED.error=''; refreshSheet(true); toast('Texture updated · save a BRRES copy to keep it'); } catch (e) { brresEditorError(e); }
+  }},'Apply texture changes'));
+  body.append(h('p',{class:'muted'},'Edits stay here until you save a copy; they are not stored in the modeling project. Archive layout is preserved, so smaller textures reduce texture memory but may not shrink the file. Models, shaders and animations remain unchanged.'));
+}
+$('#fileBRRES').addEventListener('change',async (event) => {
+  const file=event.target.files[0]; event.target.value=''; if (!file) return;
+  try { if (file.size > 128*1024*1024) throw new Error('BRRES files are limited to 128 MiB'); loadBRRESEditor(new Uint8Array(await file.arrayBuffer()),file.name); } catch (e) { brresEditorError(e); }
+});
+$('#fileBRRESTexture').addEventListener('change',async (event) => {
+  const file=event.target.files[0], target=BRED.imageTarget; event.target.value=''; if (!file || !target) return;
+  const url=URL.createObjectURL(file);
+  try {
+    if (file.size > 32*1024*1024) throw new Error('Replacement images are limited to 32 MiB');
+    const im=await new Promise((resolve,reject) => { const img=new Image(); img.onload=() => resolve(img); img.onerror=() => reject(new Error('Could not read this image')); img.src=url; });
+    if (Math.max(im.naturalWidth,im.naturalHeight) > 4096) throw new Error('Resize the replacement image to 4096 pixels or less first');
+    const c=document.createElement('canvas'); c.width=im.naturalWidth; c.height=im.naturalHeight; const ctx=c.getContext('2d'); ctx.drawImage(im,0,0);
+    if (BRED.archive !== target.archive || BRED.selected !== target.offset) return;
+    BRED.replacement={offset:target.offset,image:{width:c.width,height:c.height,rgba:new Uint8Array(ctx.getImageData(0,0,c.width,c.height).data)}};
+    BRED.error=''; refreshSheet(true);
+  } catch (e) { brresEditorError(e); } finally { URL.revokeObjectURL(url); }
+});
+
 // ==== app_ui.js ====
 // ============================================================================
 // app_ui.js — header, tools, shelf, menus, panels, gestures, keyboard, boot
@@ -8465,6 +8940,10 @@ function buildSubbar() {
     b.addEventListener('click', run);
     return b;
   };
+  if (S.tool === 'ruler') {
+    bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
+    return;
+  }
   bar.append(
     chip('Orient', ORIENT.find((x) => x[0] === S.orient)[1], () => menuSheet('Transform Orientation', ORIENT.map(([k, l]) => ({ label: l, icon: k === S.orient ? 'check' : 'dots', desc: { global: 'World X / Y / Z axes', local: "The active object's own axes", normal: 'Aligned to the selection surface (edit mode)', view: 'Aligned to the screen' }[k], run: () => { S.orient = k; settingsSet('orient', k); buildSubbar(); gizmoSync(); } })))),
     chip('Pivot', PIVOT.find((x) => x[0] === S.pivot)[1], () => menuSheet('Pivot Point', PIVOT.map(([k, l]) => ({ label: l, icon: k === S.pivot ? 'check' : 'dots', run: () => { S.pivot = k; settingsSet('pivot', k); buildSubbar(); gizmoSync(); } })))),
@@ -8485,13 +8964,13 @@ function buildSubbar() {
 }
 
 // ---------- tool columns ----------
-const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
+const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
   for (const t of TOOLS3D) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: S.tool === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { S.tool = t[0]; S.pendingTap = null; hint(null); buildTools(); gizmoSync(); });
+    b.addEventListener('click', () => { if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
@@ -8642,7 +9121,7 @@ function buildShelf() {
       shelfBtn('Shading', 'smooth', () => menuSheet('Shading', [{ label: 'Shade Smooth', icon: 'smooth', run: () => opNormals('smooth') }, { label: 'Shade Flat', icon: 'cube', run: () => opNormals('flat') }, { group: 'Normals' }, { label: 'Recalculate Outside', icon: 'normals', run: () => opNormals('outside') }, { label: 'Flip Normals', icon: 'normals', run: () => opNormals('flip') }]), true),
       shelfBtn('Origin', 'origin', menuOrigin, true), shelfBtn('Apply', 'check', menuApply, true), shelfBtn('Mirror', 'mirror', menuMirror, true), shelfBtn('Snap', 'magnet', menuSnap, true),
       shelfBtn('Hide', 'hide', () => menuSheet('Visibility', [{ label: 'Hide Selected', icon: 'eyeoff', key: 'H', run: () => opHide('hide') }, { label: 'Reveal Hidden', icon: 'eye', key: 'Alt H', run: () => opHide('reveal') }]), true), g(),
-      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
+      shelfBtn('Ruler', 'ruler', openRuler), shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
     );
   } else {
     sh.append(
@@ -8653,7 +9132,7 @@ function buildShelf() {
       shelfBtn('Mesh', 'cube', menuMesh, true), g(),
       shelfBtn('UV', 'uv', menuUVFrom3D, true), shelfBtn('Seams', 'seam', () => menuSheet('UV Seams', [{ label: 'Mark Seam', icon: 'seam', desc: 'Selected edges become cuts for Unwrap', run: () => opSeam(true) }, { label: 'Clear Seam', icon: 'seam', run: () => opSeam(false) }]), true),
       shelfBtn('Snap', 'magnet', menuSnap, true), shelfBtn('Mirror', 'mirror', menuMirror, true), g(),
-      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
+      shelfBtn('Ruler', 'ruler', openRuler), shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
     );
   }
   if (S.view === 'split') sh.append(g(), shelfBtn('UV Shelf', 'uv', () => { S.focus = 'uv'; buildShelf(); }));
@@ -8811,6 +9290,7 @@ function menuFile() {
     { label: 'Open Project…', icon: 'folder', desc: 'A .pocketmesh.json file', run: () => $('#fileProj').click() },
     { label: 'Save Project', icon: 'save', desc: 'Save to Files, iCloud Drive, AirDrop…', run: saveProjectFile },
     { group: 'Exchange' },
+    { label: 'BRRES Editor…', icon: 'folder', desc: 'Inspect resources, preview and resize textures', run: openBRRESEditor },
     { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
     { label: 'Export as BRRES…', icon: 'export', desc: 'Wii model and textures', run: () => { settingsSet('export', { ...settingsGet('export', {}), fmt: 'brres', zip: false }); openExport(); } },
     { label: 'Import OBJ + materials…', desc: 'Select OBJ, MTL and images together', icon: 'import', run: () => $('#fileObj').click() },
@@ -8836,7 +9316,7 @@ function newScene() {
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
   S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
-  S.cursor.set(0, 0, 0);
+  S.cursor.set(0, 0, 0); S.ruler = normalizeRuler(); rulerResetPending();
   const mat = newMaterial('Material', '#c9ccd2');
   const o = createObject('Cube', primCube(), { materials: [mat.id] });
   o.selected = true; S.active = o;
@@ -9267,6 +9747,7 @@ onSelectionChanged = () => {
   refreshSheet();
 };
 onModeChanged = () => {
+  buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
   $('#selModes').hidden = S.mode !== 'edit';
   for (const b of document.querySelectorAll('#selModes button')) b.classList.toggle('on', b.dataset.sm === S.selectMode);
@@ -9279,7 +9760,7 @@ onHistoryChanged = () => {
   if (LAST.op && LAST.op.idx !== UNDO.idx) { LAST.op = null; hideRedoPanel(); }
   scheduleAutosave();
 };
-afterRestore = () => { onModeChanged(); onSelectionChanged(); };
+afterRestore = () => { onModeChanged(); onSelectionChanged(); buildSubbar(); };
 const _origSetSelectMode = setSelectMode;
 setSelectMode = function (m) { _origSetSelectMode(m); onModeChanged(); };
 
@@ -9335,6 +9816,7 @@ c3d.addEventListener('pointerdown', (e) => {
 c3d.addEventListener('pointermove', (e) => {
   const p = rel(e);
   if (!G.p.has(e.pointerId)) {
+    if (S.tool === 'ruler' && G.p.size === 0 && !TF.active && !PM.active) { RULER.hover = rulerPick(p.x,p.y,18); requestRender(); }
     // desktop: modal transforms follow the hovering mouse like Blender
     if (e.pointerType === 'mouse' && TF.active && G.p.size === 0) {
       if (G.hover) tfDrag(p.x - G.hover.x, p.y - G.hover.y);
@@ -9347,7 +9829,7 @@ c3d.addEventListener('pointermove', (e) => {
   const dx = p.x - pt.x, dy = p.y - pt.y;
   pt.x = p.x; pt.y = p.y;
   if (Math.hypot(p.x - pt.x0, p.y - pt.y0) > (e.pointerType === 'mouse' ? 4 : 9)) G.moved = true;
-  if (G.moved) cancelHold();
+  if (G.moved) { cancelHold(); if (S.tool === 'ruler') RULER.hover = null; }
   if (G.mode === 'two' && G.p.size === 2) {
     const t = twoInfo();
     let dth = Math.atan2(Math.sin(t.ang - G.two.ang), Math.cos(t.ang - G.two.ang));
@@ -9419,6 +9901,7 @@ function handleTap(x, y, ptype) {
   const radius = ptype === 'mouse' ? 14 : 28;
   if (S.pendingTap === 'loopcut') { loopCutAt(x, y); return; }
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
+  if (S.tool === 'ruler') { rulerTap(x,y,radius); return; }
   if (S.tool === 'cursor') { placeCursor(x, y); return; }
   const now = performance.now();
   const dbl = !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
@@ -9629,7 +10112,7 @@ document.addEventListener('keydown', (e) => {
     case 'p': if (edit) opSeparate('selected'); break;
     case 'n': openProps(); break;
     case 'h': if (!edit) opHide('hide'); break;
-    case 'escape': S.pendingTap = null; hint(null); break;
+    case 'escape': S.pendingTap = null; if (S.tool === 'ruler') { if (RULER.first) rulerResetPending(); else rulerDone(); } hint(null); break;
   }
 });
 
@@ -9676,7 +10159,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { S, CAM, UNDO, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

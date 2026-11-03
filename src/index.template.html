@@ -177,6 +177,8 @@ input[type=color] { width: 100%; height: 34px; border: 1px solid var(--line); bo
 .btn.danger { color: var(--danger); }
 .btn svg { width: 18px; height: 18px; }
 .btn:disabled { opacity: .45; }
+.brres-preview { width: 100%; height: 180px; object-fit: contain; image-rendering: pixelated; border-radius: 8px; background: repeating-conic-gradient(#30343d 0% 25%, #232730 0% 50%) 0 0 / 20px 20px; }
+.brres-error { color: var(--danger); margin: 0; }
 .slot { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
 .slot.on { border-color: var(--sel); background: #ff9d3a14; }
 .swatch { width: 30px; height: 30px; border-radius: 7px; border: 1px solid #0006; flex: none; background-size: cover; background-position: center; }
@@ -238,6 +240,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   <main id="work" class="v-3d">
     <section class="pane" id="pane3d">
       <canvas class="view" id="c3d"></canvas>
+      <canvas class="view" id="rulerCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
       <div class="ovl" id="stats"></div>
       <div class="ovl toolcol" id="tools"></div>
       <div class="ovl" id="navwrap"><canvas id="nav" width="184" height="184"></canvas><div class="navbtns" id="navbtns"></div></div>
@@ -263,6 +266,8 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   <input type="file" id="fileProj" accept=".json,application/json" hidden>
   <input type="file" id="fileObj" multiple hidden>
   <input type="file" id="fileMat" multiple hidden>
+  <input type="file" id="fileBRRES" accept=".brres" hidden>
+  <input type="file" id="fileBRRESTexture" accept="image/*" hidden>
 </div>
 
 <script type="importmap">/*IMPORTMAP*/</script>

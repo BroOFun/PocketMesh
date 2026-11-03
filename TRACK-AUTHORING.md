@@ -34,6 +34,62 @@ item/enemy routes, starting positions, respawns or the course archive.
   opaque/cutout/blend alpha, a cutout threshold and double-sided rendering.
   Texture filtering and Repeat/Extend are independent for each material.
 
+## Ruler
+
+Tap the **ruler icon** in the left toolbar, then tap two endpoints. Vertices are
+preferred within the snapping radius, followed by edges. Otherwise the point
+lands on a visible surface or the grid at the 3D cursor’s height. Dragging still
+orbits; two fingers still navigate. In Edit Mode, snapping uses the control
+mesh; Object Mode uses the visible modifier result. Hidden objects are ignored.
+X-ray permits snapping through surfaces.
+
+Measurements use world coordinates, including object scale, and default to
+**meters** with **1 modeling unit = 1 meter**. **Ruler → Settings** changes the
+display unit (m/cm/mm/ft), meters per unit, and snapping. For coordinates stored
+in centimeters, choose `0.01` meters per unit. This changes measurement display;
+it does not resize the model or change the separate BRRES export scale.
+
+Completed measurements remain visible and are saved in the project/autosave.
+They support Undo/Redo and individual deletion or clearing in Ruler Settings.
+They store fixed world points rather than following moved or edited geometry.
+Up to 200 measurements can be retained. Escape cancels the current endpoint;
+Escape again or **Done** leaves the tool.
+
+## Basic BRRES editor
+
+1. Open **File → BRRES Editor… → Open BRRES…** and choose an uncompressed `.brres`.
+   **Use current scene** creates an archive from the visible modeling scene,
+   using scale 1 and a maximum texture dimension of 512. The modeling scene
+   remains open separately.
+2. Choose a resource. The inspector lists resource types and versions, archive
+   byte order/size, model vertex/polygon counts and material names. Texture
+   resources show dimensions, encoding name/ID, mip level count and encoded size.
+3. For textures, choose width/height or **Fit longest edge**, an output format,
+   and whether to preserve the mip count, generate a full chain, or keep only the
+   base level. Dimensions are powers of two from 1 to 1024. **Replace image…**
+   stages a new image; **Export PNG** saves the preview with alpha.
+4. Tap **Apply texture changes**, then **Save & Send BRRES…**. The saved filename
+   ends in `_edited.brres`. **Revert texture** restores that texture from the
+   originally opened file. Editor changes are held in memory, separately from
+   project autosave, until you save a copy. Opening another archive replaces them.
+
+Preview supports I4, I8, IA4, IA8, RGB565, RGB5A3, RGBA8, C4, C8, C14X2 and CMPR.
+Indexed textures use a palette with the same name, or one chosen explicitly.
+Output supports the seven uncompressed formats: RGBA8 keeps full color/alpha,
+RGB565 removes alpha, RGB5A3 reduces precision, and I/IA formats convert to gray.
+I4/I8 intensity also supplies alpha. Editing a compressed or indexed texture
+converts it to the chosen output format; CMPR/palette encoding is not included.
+Resampling and mip generation use alpha-weighted area filtering.
+
+The editor preserves existing model, material/shader, palette and animation
+bytes. It updates smaller textures in place or appends larger textures and
+updates the existing resource pointers. Consequently, reducing dimensions
+reduces encoded texture memory but may not shrink the archive file. It is a
+texture editor and resource inspector, not an importer for arbitrary BRRES
+geometry or a TEV/shader editor. TEX0 versions 1 and 3 are supported; textures
+with user metadata or unknown formats remain read-only. Files are limited to
+128 MiB and replacement images to 4096 pixels per side / 32 MiB.
+
 ## Export and send
 
 1. Use **File → Export as BRRES…**, or choose BRRES in Export Model.
@@ -58,7 +114,7 @@ keeps the image on the same surface. Use square or power-of-two source images
 for predictable pixel density. Use **Unlit** preview for the closest match to
 this exporter's material appearance.
 
-## Supported BRRES subset and limits
+## Supported new-model export subset and limits
 
 - Big-endian BRRES v0, real NW4R resource dictionary search trees, MDL0 v11 and
   TEX0 v3 with 4×4 tiled RGBA8 pixels.
@@ -101,14 +157,19 @@ npm run build
 npm test
 npx playwright install chromium
 npm run test:track:browser
+npm run test:editor:browser
 npm ci --prefix test
 npm run test:export --prefix test
 ```
 
-The browser test starts its own local server. It checks touch selection in all
+The browser tests start their own local servers. The editor test covers desktop
+and iPhone touch emulation, vertex/edge snapping in world units, measurement
+settings/persistence/undo, texture resize/format/mipmap controls, download/reopen,
+replacement images, larger appended textures, malformed-file errors and revert.
+The track browser test checks touch selection in all
 three element modes, gesture cancellation, modifier settings, undo/apply/save,
 image alpha/downscaling, imported materials, independent samplers and a real
-BRRES download. It uses Chromium iPhone viewport/touch emulation, not iOS Safari.
+BRRES download. Browser coverage uses Chromium, not iOS Safari.
 
 The optional independent parser test uses a separate noclip source checkout:
 
@@ -123,12 +184,23 @@ The test bundle keeps noclip's BRRES/display-list parsers and the relevant
 material optimizer code; UI/render-only imports and unused WASM initialization
 are excluded. Tests check dictionary lookup, decoded geometry, reflected
 winding, Y-up bounds, UV orientation, material/sampler settings, alpha draw
-lists and a draw split above 60,000 vertices. RGBA8 tiling is independently
-decoded in the core test. It does not exercise noclip's GPU renderer.
+lists and a draw split above 60,000 vertices. The editor tests cover all 11 texture decoders, seven output encodings,
+alpha-weighted resizing, mipmaps, smaller in-place updates and larger appended
+textures. They assert model-byte preservation and parse edited archives with
+noclip. Optional broader compatibility checks were run on all 21 BRRES files in
+RiiStudio’s pinned sample collection (including animation-only files); all opened,
+and edited copies parsed successfully. Sample assets are not bundled.
 
-The writer is an original implementation informed by these open-source format
+```sh
+RIISTUDIO_SAMPLES=../RiiStudio/tests/samples NOCLIP_PARSER=../work/noclip-parser.mjs node test/editor-samples.mjs
+```
+
+RGBA8 tiling is independently decoded in the core test. It does not exercise noclip's GPU renderer.
+
+The writer and texture editor are original implementations informed by these open-source format
 references, rather than a bundled converter:
 
 - [RiiStudio BRRES library](https://github.com/snailspeed3/RiiStudio/tree/c5a7cd8d5e06c39d277d80f8c8514e3c44621836/source/librii/g3d): MDL0 resources, materials, shaders, display lists and dictionaries.
 - [BrawlCrate MDL0 structures](https://github.com/soopercool101/BrawlCrate/blob/master/BrawlLib/SSBB/Types/MDL0.cs): binary layouts and versions.
 - [noclip BRRES reader](https://github.com/magcius/noclip.website/blob/e47a8cc8a9fe16e83adc0bf19153ff04c666ceca/src/rres/brres.ts): independent compatibility test and GX parsing reference.
+- [Dolphin texture decoder](https://github.com/dolphin-emu/dolphin/blob/master/Source/Core/VideoCommon/TextureDecoder_Generic.cpp): Wii tiled pixels, palettes, alpha and CMPR interpolation.
