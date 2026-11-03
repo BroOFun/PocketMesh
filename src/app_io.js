@@ -281,7 +281,7 @@ function runExport(fmt, opts) {
   if (!scene.objects.length) throw new Error(opts.selectedOnly ? 'No selected objects to export' : 'Nothing to export');
   const eo = { yUp: opts.yUp, applyTransforms: opts.applyTransforms, triangulate: opts.triangulate, baseName: opts.baseName };
   let files;
-  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: opts.scale ?? S.track.scale });
+  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: S.track.scale });
   else if (fmt === 'obj') files = exportOBJ(scene, eo);
   else if (fmt === 'fbx') files = exportFBX(scene, eo);
   else if (fmt === 'dae') files = exportDAE(scene, eo);

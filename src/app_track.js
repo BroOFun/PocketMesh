@@ -14,7 +14,9 @@ function trackCommit(label) {
   requestRender();
 }
 function setTrackScale(value) {
+  if (!Number.isFinite(value) || value < 0.001 || value > 100000) return;
   S.track.scale = value;
+  S.track.scaleVersion = 1;
   const ex = settingsGet('export', {});
   ex.scale = value;
   settingsSet('export', ex);
@@ -22,9 +24,17 @@ function setTrackScale(value) {
 }
 function trackScaleField() {
   return field(
-    'Wii units per model unit',
+    'Course model export scale',
     numInput(S.track.scale, setTrackScale, { min: 0.001, max: 100000, label: 'Shared Wii export scale' }),
   );
+}
+function openTrackEditor() {
+  menuSheet('Track Editor', [
+    {label: 'Course Model', icon: 'cube', desc: 'Model geometry, BRRES resources and textures', run: () => { setWorkspace('model'); openBRRESEditor(); }},
+    {label: 'KCL', icon: 'layers', desc: 'Collision materials and road types', run: () => setWorkspace('kcl')},
+    {label: 'KMP', icon: 'cursor', desc: 'Start position and driving direction', run: () => setWorkspace('kmp')},
+    {label: 'SZS', icon: 'folder', desc: 'Track archive and file replacement', run: openSZSEditor},
+  ]);
 }
 function setWorkspace(workspace) {
   if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
@@ -55,18 +65,9 @@ function setWorkspace(workspace) {
   );
 }
 function trackSubbar(bar) {
-  bar.append(
-    segButtons(
-      S.workspace,
-      [
-        ['model', 'Model'],
-        ['kcl', 'KCL'],
-        ['kmp', 'KMP'],
-      ],
-      setWorkspace,
-    ),
-  );
-  bar.append(trackButton('SZS', openSZSEditor));
+  const menu = trackButton('Track Editor ▾', openTrackEditor);
+  menu.setAttribute('aria-label', 'Track Editor');
+  bar.append(menu, h('span', {class: 'muted', style: {whiteSpace: 'nowrap'}}, S.workspace === 'model' ? 'Course Model' : S.workspace.toUpperCase()));
   if (S.workspace === 'model') return false;
   bar.append(
     trackButton(S.workspace === 'kcl' ? 'Materials & flags' : 'Start point', S.workspace === 'kcl' ? openKCL : openKMP),

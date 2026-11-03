@@ -73,6 +73,52 @@ function addPrimitive(type) {
 }
 
 // ---------- extrude / duplicate ----------
+function activateExtrude() {
+  if (!needEdit()) return;
+  if (TF.active) tfConfirm();
+  if (PM.active) pmConfirm();
+  closeSheet();
+  if (S.view !== '3d') setWorkView('3d');
+  S.tool = 'extrude'; S.pendingTap = null; S.multiSelect = false; S.selOp = 'set';
+  buildTools(); buildSubbar(); gizmoSync();
+  extrudeHint();
+}
+function extrudeHint() {
+  hint(S.extrudeTap ? 'Tap to extrude at the selection’s depth · drag to orbit · Rotate to tap bends the next section' : 'Select geometry, then Drag extrude · or enable Tap extrude');
+}
+function tapExtrudeAt(x, y) {
+  if (S.workspace !== 'model' || S.mode !== 'edit' || !S.active || TF.active || PM.active) return;
+  const o = S.active, selected = o.esel.verts;
+  o.node.updateMatrixWorld(true);
+  const inv = o.node.matrixWorld.clone().invert();
+  if (Math.abs(o.node.matrixWorld.determinant()) < 1e-12) { toast('Restore a nonzero object scale before extruding', true); return; }
+  const center = selected.size ? new THREE.Vector3(...vscale([...selected].reduce((sum, v) => vadd(sum, o.mesh.verts[v]), [0, 0, 0]), 1 / selected.size)).applyMatrix4(o.node.matrixWorld) : S.cursor.clone();
+  const view = new THREE.Vector3(0, 0, 1).applyQuaternion(camera.quaternion);
+  const target = rayPlane(x, y, center, view);
+  if (!target) return;
+  let nx = 0, ny = 0;
+  for (const key of o.esel.edges) {
+    const [a, b] = ekeySplit(key);
+    const p = toScreen(new THREE.Vector3(...o.mesh.verts[a]).applyMatrix4(o.node.matrixWorld));
+    const q = toScreen(new THREE.Vector3(...o.mesh.verts[b]).applyMatrix4(o.node.matrixWorld));
+    const dx = q.x - p.x, dy = q.y - p.y;
+    const sign = -dy * (x - (p.x + q.x) / 2) + dx * (y - (p.y + q.y) / 2) >= 0 ? 1 : -1;
+    nx -= dy * sign; ny += dx * sign;
+  }
+  const inverseLinear = new THREE.Matrix3().setFromMatrix4(inv);
+  const direction = new THREE.Vector3(nx, -ny, 0).applyQuaternion(camera.quaternion).applyMatrix3(inverseLinear);
+  const localView = view.clone().applyMatrix3(inverseLinear).normalize();
+  direction.addScaledVector(localView, -direction.dot(localView)).normalize();
+  try {
+    const next = cloneMesh(o.mesh);
+    const r = extrudeToPoint(next, o.esel, target.applyMatrix4(inv).toArray(), {rotate: S.extrudeRotate, rotateSource: S.extrudeRotateSource, direction: direction.toArray(), viewAxis: localView.toArray()});
+    if (!r) return;
+    o.mesh = next;
+    if (r.addedVertex) S.selectMode = 'vert';
+    setSelVerts(r.verts); rebuildObject(o);
+    LAST.op = null; hideRedoPanel(); pushUndo('Tap Extrude'); onModeChanged(); onSelectionChanged();
+  } catch (e) { toast(e.message, true); }
+}
 function opExtrude() {
   if (!needSel()) return;
   const o = S.active;

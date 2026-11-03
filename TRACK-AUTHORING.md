@@ -1,7 +1,8 @@
 # Track workspaces and BRRES / KCL / KMP export
 
-PocketMesh shares one model and camera between **Model**, **KCL** and **KMP**
-workspaces. It exports `course_model.brres`, `course.kcl` and `course.kmp`.
+PocketMesh shares one model and camera between **Course Model**, **KCL** and **KMP**
+workspaces under **Track Editor**, alongside the **SZS** archive editor.
+It exports `course_model.brres`, `course.kcl` and `course.kmp`.
 The KMP editor supports a start point and automatic drive-test scaffolding,
 or updating the first start point in an existing KMP. Full race authoring still requires other tools. The SZS editor replaces files in an existing track package.
 
@@ -70,7 +71,7 @@ Escape again or **Done** leaves the tool.
 
 ## Basic BRRES editor
 
-1. Open **File → BRRES Editor… → Open BRRES…** and choose an uncompressed `.brres`.
+1. Open **Track Editor → Course Model → Open BRRES…** and choose an uncompressed `.brres`.
    **Use current scene** creates an archive from the visible modeling scene,
    using the shared Wii export scale and a maximum texture dimension of 512. The modeling scene
    remains open separately.
@@ -153,7 +154,7 @@ this exporter's material appearance.
 
 ## KCL workspace
 
-Use the **Model / KCL / KMP** buttons in the option bar, or File → KCL Editor.
+Use **Track Editor → KCL** in the option bar or File menu.
 The viewport, materials and camera are shared. Drag/pinch navigation works as
 before; tapping a surface selects its material in the collision panel.
 
@@ -214,7 +215,7 @@ texture: the same image can be normal road, boost, or another assigned behavior.
 3. **Start settings** also exposes coordinates and **Snap height again**.
    Editing X/Y re-snaps height to the nearest road level to the previous height,
    so a bridge does not always force the point onto its topmost surface.
-4. Set **Wii units per model unit** consistently. This is now one project setting
+4. Set **Course model export scale** consistently. This is now one project setting
    shared by BRRES/KCL/KMP. Exports convert editor Z-up to Wii Y-up (`x,z,-y`).
    Previously exported files must be re-exported after changing this scale.
 5. Tap **Export & Send KMP**. With no imported KMP, PocketMesh creates an original
@@ -242,7 +243,7 @@ or collision. No Wii/Dolphin gameplay test has been performed for these exports.
 
 ## SZS archive editor
 
-1. Tap **SZS** beside the workspace selector, or **File → SZS Editor**. Open an
+1. Tap **Track Editor → SZS** in the option bar or File menu. Open an
    existing `.szs` (Yaz0-compressed U8) or uncompressed `.u8`/`.arc` track archive.
    Browse all folders/files or search by path/type; large listings are paginated.
 2. Select a file and choose **Replace selected file…**. The archive path stays
@@ -405,3 +406,39 @@ already preserves the shape, so its boundary setting has no effect.
 In Object Mode, tap **Multiselect** or hold an object to enter multiselect.
 Tap any selected object to remove it, including one that is not active.
 The same selection works in the Scene list and with group transforms.
+
+## Track Editor and 100× Wii exports
+
+The **Track Editor** menu contains **Course Model**, **KCL**, **KMP**, and **SZS**.
+Course Model opens the BRRES resources/textures panel; **Edit geometry** returns
+to the shared modeling viewport. The menu is also available from File.
+Move, Rotate, and Scale stay on the left toolbar; the duplicate bottom-row
+transform actions have been removed.
+
+New projects export the course model at **100×** the editor coordinates. KCL
+collision, authored KMP start coordinates, and generated files inserted into SZS
+use the same course-model export scale. The viewport and meter ruler stay at
+modeling size. Existing projects with the former default scale of 1 migrate to
+100; custom scales are retained. Changing the scale in Course Model updates all
+three exporters; **Use 100×** restores the Mario Kart Wii preset. Re-export the
+three files together after a change. Existing imported BRRES archives and preserved
+sections of imported KMP templates remain in their original Wii coordinates.
+
+## Tap extrusion
+
+In Edit Mode select the boundary vertices, edges, or faces, then press **Extrude**
+on the bottom row or left toolbar. **Drag extrude** retains the ordinary modal
+extrusion. Enable **Tap extrude** to extrude repeatedly toward tapped points in
+the view plane at the selection's depth. Dragging continues to navigate the view.
+With nothing selected, a tap adds a vertex and subsequent taps extend a wire.
+**Done** or Escape returns to selection. Desktop users can also Ctrl-right-click
+in Edit Mode to extrude to the cursor.
+
+**Tap extrude** and **Rotate to tap** start off. Rotate to tap turns each new section
+toward the tap. With **Rotate source** on, the previous section turns halfway and
+the new section completes the turn, matching the source/destination behavior of
+[Blender's cursor extrusion](https://github.com/blender/blender/blob/main/source/blender/editors/mesh/editmesh_extrude.cc).
+Turn Rotate source off to leave the previous section fixed. Each tap is undoable,
+preserves face materials, and keeps the new section selected for the next tap.
+Use top/front/side views to control the plane of a track segment; this tool does
+not automatically snap new sections onto another surface.

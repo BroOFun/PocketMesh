@@ -116,3 +116,10 @@ and exports. Keep Corners pins boundary vertices with exactly one incident face
 (the OpenSubdiv edge-and-corner rule); Keep All Boundary Edges pins every boundary
 vertex. Old modifiers without a boundary setting retain Smooth; new modifiers
 default to Keep Corners. Simple subdivision leaves original positions unchanged.
+
+Track state now has `scaleVersion: 1`. The default `scale` is 100 Wii units per
+model unit. Unversioned legacy scale 1 migrates to 100; other valid custom values
+are preserved. A versioned scale 1 remains valid if explicitly chosen. All scene
+BRRES/KCL/KMP export entry points use `S.track.scale`; per-call BRRES overrides in
+the editor cannot make the files disagree. Pure format encoders still accept an
+explicit scale without changing input geometry.

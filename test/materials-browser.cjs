@@ -49,7 +49,7 @@ const {chromium,devices}=require('playwright');
   const onlyFile=await download('Export & Send BRRES…',`road-only-${mobile?'mobile':'desktop'}.brres`);
   assert.deepEqual(api.inspectBRRES(new Uint8Array(fs.readFileSync(onlyFile))).materials.map(m=>m.name),['Road']);
   await page.locator('#sheetClose').click();await openExport();assert.equal(await page.getByLabel('Selected objects only',{exact:true}).isChecked(),true);await page.getByLabel('Selected objects only',{exact:true}).uncheck();
-  await page.locator('#sheetClose').click();await page.locator('#btnMenu').click();await page.getByRole('button',{name:/BRRES Editor/}).click();
+  await page.locator('#sheetClose').click();await page.locator('#sub').getByRole('button',{name:'Track Editor',exact:true}).click();await page.locator('#sheet').getByRole('button',{name:/Course Model/}).click();
   await page.locator('#fileBRRES').setInputFiles(file);await page.getByRole('button',{name:'Inspect material FinishLine in course',exact:true}).waitFor();
   assert.ok(await page.getByRole('button',{name:'Inspect material Boost in course',exact:true}).isVisible());
   await page.getByRole('button',{name:'Inspect material Boost in course',exact:true}).click();
