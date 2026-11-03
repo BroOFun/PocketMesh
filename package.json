@@ -13,7 +13,8 @@
     "test:editor:browser": "node test/editor-browser.cjs",
     "test:materials:browser": "node test/materials-browser.cjs",
     "test:workspaces:browser": "node test/workspaces-browser.cjs",
-    "test:szs:browser": "node test/szs-browser.cjs"
+    "test:szs:browser": "node test/szs-browser.cjs",
+    "test:backfaces:browser": "node test/backfaces-browser.cjs"
   },
   "license": "UNLICENSED",
   "dependencies": {

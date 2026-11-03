@@ -6684,7 +6684,7 @@ const S = {
   pivot: 'median', orient: 'global',
   snap: false, snapMove: 0.1, snapRot: 5, snapScale: 0.1,
   prop: false, propRadius: 1, propFalloff: 'smooth',
-  shading: 'solid', xray: false, faceOrient: false, view: '3d',
+  shading: 'solid', xray: false, faceOrient: true, view: '3d',
   workspace: 'model', track: normalizeTrack(),
   cursor: new THREE.Vector3(), ruler: normalizeRuler(),
   uvSel: new Set(), uvTool: 'select', uvStretch: false,
@@ -6809,11 +6809,32 @@ scene.add(tc);
 // ---------- materials ----------
 const DEFAULT_MAT = { id: 0, name: 'Default', color: '#c9ccd2', roughness: 0.55, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
 const threeMatCache = new Map();
-const faceOrientMat = new THREE.ShaderMaterial({
-  vertexShader: 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: 'void main(){ gl_FragColor = gl_FrontFacing ? vec4(0.22, 0.45, 0.95, 1.0) : vec4(0.92, 0.2, 0.22, 1.0); }',
-  side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
-});
+// View-only tint: keep the normal material, texture, lighting and alpha handling.
+const backfaceTint = { value: 1 }, backfaceWire = { value: 0 };
+function addBackfaceTint(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.pmBackfaceTint = backfaceTint;
+    shader.uniforms.pmBackfaceWire = backfaceWire;
+    shader.fragmentShader = 'uniform float pmBackfaceTint;\nuniform float pmBackfaceWire;\n' + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace('#include <premultiplied_alpha_fragment>', `
+      if (pmBackfaceTint > 0.5) {
+        bool pmIsBack = !gl_FrontFacing;
+        // Three.js reverses front-face winding for the back pass of transparent materials.
+        #ifdef FLIP_SIDED
+          pmIsBack = !pmIsBack;
+        #endif
+        if (pmBackfaceWire > 0.5) {
+          if (!pmIsBack) discard;
+          gl_FragColor = vec4(1.0, 0.16, 0.20, gl_FragColor.a * 0.22);
+        } else if (pmIsBack) {
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0, 0.16, 0.20), 0.28);
+        }
+      }
+      #include <premultiplied_alpha_fragment>
+    `);
+  };
+  material.customProgramCacheKey = () => 'pocketmesh-backfaces-v1';
+}
 function matById(id) { return S.materials.find((m) => m.id === id) || null; }
 function newMaterial(name = 'Material', color = '#c9ccd2') {
   const m = { id: _matNid++, name: uniqueMatName(name), color, roughness: 0.5, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
@@ -6849,9 +6870,12 @@ function threeMat(mat) {
   if (!e) {
     const base = { side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
     e = { solid: new THREE.MeshStandardMaterial({ ...base }), pbr: new THREE.MeshStandardMaterial({ ...base }), unlit: new THREE.MeshBasicMaterial({ ...base }) };
+    for (const material of Object.values(e)) addBackfaceTint(material);
     threeMatCache.set(mat.id, e);
   }
-  const xray = S.xray;
+  const xray = S.xray, wireOverlay = S.faceOrient && S.shading === 'wire';
+  backfaceTint.value = S.faceOrient ? 1 : 0;
+  backfaceWire.value = S.shading === 'wire' ? 1 : 0;
   const tex = mat.texture && mat.useTexture !== false ? threeTexFor(mat.texture, mat.filter, mat.wrap) : null;
   const base = tex && !mat.tint ? '#ffffff' : mat.color;
   e.solid.color.set(base);
@@ -6861,10 +6885,10 @@ function threeMat(mat) {
   for (const m of [e.solid, e.pbr, e.unlit]) if (m.map !== tex) { m.map = tex; m.needsUpdate = true; }
   for (const m of [e.solid, e.pbr, e.unlit]) {
     const a = mat.alphaMode === 'opaque' ? 1 : mat.alpha;
-    const transparent = xray || mat.alphaMode === 'blend' || (mat.alphaMode !== 'cutout' && mat.alphaMode !== 'opaque' && a < 1);
+    const transparent = wireOverlay || xray || mat.alphaMode === 'blend' || (mat.alphaMode !== 'cutout' && mat.alphaMode !== 'opaque' && a < 1);
     const cutoff = mat.alphaMode === 'cutout' ? (mat.alphaCutoff ?? 0.5) : 0;
     if (m.alphaTest !== cutoff) { m.alphaTest = cutoff; m.needsUpdate = true; }
-    const side = mat.doubleSided !== false ? THREE.DoubleSide : THREE.FrontSide;
+    const side = S.faceOrient || mat.doubleSided !== false ? THREE.DoubleSide : THREE.FrontSide;
     if (m.side !== side) { m.side = side; m.needsUpdate = true; }
     if (m.transparent !== transparent) { m.transparent = transparent; m.needsUpdate = true; }
     m.opacity = xray ? 0.32 * a : a;
@@ -6873,7 +6897,6 @@ function threeMat(mat) {
   return e;
 }
 function objMaterials(o) {
-  if (S.faceOrient) return faceOrientMat;
   const slots = o.materials.length ? o.materials : [0];
   return slots.map((id) => {
     const mat = matById(id) || DEFAULT_MAT;
@@ -7037,7 +7060,7 @@ function refreshOverlays(o) {
   const wire = S.shading === 'wire';
   const seeThrough = S.xray || wire;
   const T = topo(m);
-  o.meshNode.visible = !wire;
+  o.meshNode.visible = !wire || S.faceOrient;
   if (o.fselOv) o.fselOv.visible = false;
   // edges
   const showEdges = editing || wire || o.selected;
@@ -11250,8 +11273,12 @@ function menuShading() {
     ...SHADES.map(([k, ic, l, d]) => ({ label: l, icon: ic, desc: d + (S.shading === k ? ' · current' : ''), run: () => setShading(k) })),
     { group: 'Overlays' },
     { label: S.xray ? 'X-ray: on' : 'X-ray: off', icon: 'xray', desc: 'See and select through the mesh', run: () => $('#btnXray').click() },
-    { label: S.faceOrient ? 'Face orientation: on' : 'Face orientation: off', icon: 'normals', desc: 'Blue = front, red = back', run: () => { S.faceOrient = !S.faceOrient; refreshMaterials(); } },
+    { label: S.faceOrient ? 'Backface overlay: on' : 'Backface overlay: off', icon: 'normals', desc: 'Subtle red = back · front faces keep their appearance', run: () => setBackfaceOverlay(!S.faceOrient) },
   ]);
+}
+function setBackfaceOverlay(enabled) {
+  S.faceOrient = !!enabled; settingsSet('backfaceOverlay', S.faceOrient);
+  refreshAllObjects(); refreshSheet(); requestRender();
 }
 function buildShadebar() { const b = $('#btnShade'); if (b) b.innerHTML = icon(SHADES.find((x) => x[0] === S.shading)[1]); }
 function setShading(k) {
@@ -11871,7 +11898,7 @@ function openSettings(focus) {
         : 'One finger orbits. Two fingers: drag to pan, pinch to zoom, twist to turn the view.'));
     const view = h('div', { class: 'card' }, h('h3', {}, 'Viewport'),
       checkInput('Show floor grid', S.showGrid, (v) => { S.showGrid = v; gridGroup.visible = v && S.shading !== 'rendered'; settingsSet('grid', v); requestRender(); }),
-      checkInput('Face orientation (blue = front, red = back)', S.faceOrient, (v) => { S.faceOrient = v; refreshMaterials(); }),
+      checkInput('Backface overlay (subtle red)', S.faceOrient, setBackfaceOverlay),
       field('UV layout size', selectInput(settingsGet('uvLayoutSize', 1024), [[512, '512 px'], [1024, '1024 px'], [2048, '2048 px'], [4096, '4096 px']], (v) => settingsSet('uvLayoutSize', +v), 'UV layout size')));
     body.append(...(focus === 'prop' ? [prop, nav, snap, view] : [nav, snap, prop, view]));
     body.append(h('p', { class: 'muted', style: { margin: '2px 4px' } }, 'PocketMesh 1.0 · works offline · your scene autosaves on this device.'));
@@ -12326,6 +12353,7 @@ function loadSettings() {
   S.snapMove = settingsGet('snapMove', 0.1); S.snapRot = settingsGet('snapRot', 5); S.snapScale = settingsGet('snapScale', 0.1);
   S.propRadius = settingsGet('propRadius', 1); S.propFalloff = settingsGet('propFalloff', 'smooth');
   S.shading = settingsGet('shading', 'solid');
+  S.faceOrient = settingsGet('backfaceOverlay', true) !== false;
   S.showGrid = settingsGet('grid', true);
   S.navStyle = settingsGet('navStyle', 'modeler');
 }
@@ -12361,7 +12389,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

@@ -110,7 +110,7 @@ const S = {
   pivot: 'median', orient: 'global',
   snap: false, snapMove: 0.1, snapRot: 5, snapScale: 0.1,
   prop: false, propRadius: 1, propFalloff: 'smooth',
-  shading: 'solid', xray: false, faceOrient: false, view: '3d',
+  shading: 'solid', xray: false, faceOrient: true, view: '3d',
   workspace: 'model', track: normalizeTrack(),
   cursor: new THREE.Vector3(), ruler: normalizeRuler(),
   uvSel: new Set(), uvTool: 'select', uvStretch: false,
@@ -235,11 +235,32 @@ scene.add(tc);
 // ---------- materials ----------
 const DEFAULT_MAT = { id: 0, name: 'Default', color: '#c9ccd2', roughness: 0.55, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
 const threeMatCache = new Map();
-const faceOrientMat = new THREE.ShaderMaterial({
-  vertexShader: 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-  fragmentShader: 'void main(){ gl_FragColor = gl_FrontFacing ? vec4(0.22, 0.45, 0.95, 1.0) : vec4(0.92, 0.2, 0.22, 1.0); }',
-  side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1,
-});
+// View-only tint: keep the normal material, texture, lighting and alpha handling.
+const backfaceTint = { value: 1 }, backfaceWire = { value: 0 };
+function addBackfaceTint(material) {
+  material.onBeforeCompile = (shader) => {
+    shader.uniforms.pmBackfaceTint = backfaceTint;
+    shader.uniforms.pmBackfaceWire = backfaceWire;
+    shader.fragmentShader = 'uniform float pmBackfaceTint;\nuniform float pmBackfaceWire;\n' + shader.fragmentShader;
+    shader.fragmentShader = shader.fragmentShader.replace('#include <premultiplied_alpha_fragment>', `
+      if (pmBackfaceTint > 0.5) {
+        bool pmIsBack = !gl_FrontFacing;
+        // Three.js reverses front-face winding for the back pass of transparent materials.
+        #ifdef FLIP_SIDED
+          pmIsBack = !pmIsBack;
+        #endif
+        if (pmBackfaceWire > 0.5) {
+          if (!pmIsBack) discard;
+          gl_FragColor = vec4(1.0, 0.16, 0.20, gl_FragColor.a * 0.22);
+        } else if (pmIsBack) {
+          gl_FragColor.rgb = mix(gl_FragColor.rgb, vec3(1.0, 0.16, 0.20), 0.28);
+        }
+      }
+      #include <premultiplied_alpha_fragment>
+    `);
+  };
+  material.customProgramCacheKey = () => 'pocketmesh-backfaces-v1';
+}
 function matById(id) { return S.materials.find((m) => m.id === id) || null; }
 function newMaterial(name = 'Material', color = '#c9ccd2') {
   const m = { id: _matNid++, name: uniqueMatName(name), color, roughness: 0.5, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
@@ -275,9 +296,12 @@ function threeMat(mat) {
   if (!e) {
     const base = { side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
     e = { solid: new THREE.MeshStandardMaterial({ ...base }), pbr: new THREE.MeshStandardMaterial({ ...base }), unlit: new THREE.MeshBasicMaterial({ ...base }) };
+    for (const material of Object.values(e)) addBackfaceTint(material);
     threeMatCache.set(mat.id, e);
   }
-  const xray = S.xray;
+  const xray = S.xray, wireOverlay = S.faceOrient && S.shading === 'wire';
+  backfaceTint.value = S.faceOrient ? 1 : 0;
+  backfaceWire.value = S.shading === 'wire' ? 1 : 0;
   const tex = mat.texture && mat.useTexture !== false ? threeTexFor(mat.texture, mat.filter, mat.wrap) : null;
   const base = tex && !mat.tint ? '#ffffff' : mat.color;
   e.solid.color.set(base);
@@ -287,10 +311,10 @@ function threeMat(mat) {
   for (const m of [e.solid, e.pbr, e.unlit]) if (m.map !== tex) { m.map = tex; m.needsUpdate = true; }
   for (const m of [e.solid, e.pbr, e.unlit]) {
     const a = mat.alphaMode === 'opaque' ? 1 : mat.alpha;
-    const transparent = xray || mat.alphaMode === 'blend' || (mat.alphaMode !== 'cutout' && mat.alphaMode !== 'opaque' && a < 1);
+    const transparent = wireOverlay || xray || mat.alphaMode === 'blend' || (mat.alphaMode !== 'cutout' && mat.alphaMode !== 'opaque' && a < 1);
     const cutoff = mat.alphaMode === 'cutout' ? (mat.alphaCutoff ?? 0.5) : 0;
     if (m.alphaTest !== cutoff) { m.alphaTest = cutoff; m.needsUpdate = true; }
-    const side = mat.doubleSided !== false ? THREE.DoubleSide : THREE.FrontSide;
+    const side = S.faceOrient || mat.doubleSided !== false ? THREE.DoubleSide : THREE.FrontSide;
     if (m.side !== side) { m.side = side; m.needsUpdate = true; }
     if (m.transparent !== transparent) { m.transparent = transparent; m.needsUpdate = true; }
     m.opacity = xray ? 0.32 * a : a;
@@ -299,7 +323,6 @@ function threeMat(mat) {
   return e;
 }
 function objMaterials(o) {
-  if (S.faceOrient) return faceOrientMat;
   const slots = o.materials.length ? o.materials : [0];
   return slots.map((id) => {
     const mat = matById(id) || DEFAULT_MAT;
@@ -463,7 +486,7 @@ function refreshOverlays(o) {
   const wire = S.shading === 'wire';
   const seeThrough = S.xray || wire;
   const T = topo(m);
-  o.meshNode.visible = !wire;
+  o.meshNode.visible = !wire || S.faceOrient;
   if (o.fselOv) o.fselOv.visible = false;
   // edges
   const showEdges = editing || wire || o.selected;
