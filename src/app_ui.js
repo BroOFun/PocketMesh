@@ -244,6 +244,10 @@ function buildTools() {
     b.addEventListener('click', () => { setEditorFocus('3d'); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
+  if (S.workspace === 'model') col.append(h('hr'), h('button', {
+    html: icon('trash'), 'aria-label': 'Delete', title: 'Delete',
+    onclick: () => { setEditorFocus('3d'); finishEditorInteraction(); S.mode === 'edit' ? menuDelete() : opDelete(); },
+  }));
   const uc = $('#uvtools'); uc.innerHTML = '';
   for (const t of [['select', 'select', 'Tap select · drag to pan'], ['box', 'box', 'Box select'], null, ['move', 'move', 'Drag to move UVs'], ['rotate', 'rotate', 'Drag to rotate UVs'], ['scale', 'scale', 'Drag to scale UVs'], null, ['fit', 'frame', 'Fit view']]) {
     if (!t) { uc.append(h('hr')); continue; }
@@ -391,7 +395,7 @@ function buildShelf() {
   if (S.mode === 'object') {
     sh.append(
       shelfBtn('Add', 'plus', menuAdd, true), shelfBtn('Edit Mode', 'edit', () => setMode('edit')), g(),
-      shelfBtn('Duplicate', 'duplicate', opDuplicate), shelfBtn('Delete', 'trash', () => opDelete()), shelfBtn('Join', 'join', opJoin),
+      shelfBtn('Duplicate', 'duplicate', opDuplicate), shelfBtn('Join', 'join', opJoin),
       shelfBtn('Separate', 'separate', () => menuSheet('Separate', [{ label: 'By Material', icon: 'material', desc: 'One object per material slot', run: () => opSeparate('material') }, { label: 'By Loose Parts', icon: 'separate', desc: 'One object per disconnected piece', run: () => opSeparate('loose') }]), true),
       shelfBtn('Shading', 'smooth', () => menuSheet('Shading', [{ label: 'Shade Smooth', icon: 'smooth', run: () => opNormals('smooth') }, { label: 'Shade Flat', icon: 'cube', run: () => opNormals('flat') }, { group: 'Normals' }, { label: 'Recalculate Outside', icon: 'normals', run: () => opNormals('outside') }, { label: 'Flip Normals', icon: 'normals', run: () => opNormals('flip') }]), true),
       shelfBtn('Origin', 'origin', menuOrigin, true), shelfBtn('Apply', 'check', menuApply, true), shelfBtn('Mirror', 'mirror', menuMirror, true), shelfBtn('Snap', 'magnet', menuSnap, true),
@@ -402,7 +406,7 @@ function buildShelf() {
     sh.append(
       shelfBtn('Add', 'plus', menuAdd, true), shelfBtn('Select', 'selall', menuSelect, true), g(),
       shelfBtn('Extrude', 'extrude', activateExtrude), shelfBtn('Inset', 'inset', opInset), shelfBtn('Loop Cut', 'loopcut', opLoopCutStart), shelfBtn('Subdivide', 'subdivide', opSubdivide),
-      shelfBtn('Fill', 'fill', menuFill, true), shelfBtn('Merge', 'merge', menuMerge, true), shelfBtn('Delete', 'trash', menuDelete, true), shelfBtn('Duplicate', 'duplicate', opDuplicate),
+      shelfBtn('Fill', 'fill', menuFill, true), shelfBtn('Merge', 'merge', menuMerge, true), shelfBtn('Duplicate', 'duplicate', opDuplicate),
       shelfBtn('Mesh', 'cube', menuMesh, true), g(),
       shelfBtn('UV', 'uv', menuUVFrom3D, true), shelfBtn('Seams', 'seam', () => menuSheet('UV Seams', [{ label: 'Mark Seam', icon: 'seam', desc: 'Selected edges become cuts for Unwrap', run: () => opSeam(true) }, { label: 'Clear Seam', icon: 'seam', run: () => opSeam(false) }]), true),
       shelfBtn('Snap', 'magnet', menuSnap, true), shelfBtn('Mirror', 'mirror', menuMirror, true), g(),
