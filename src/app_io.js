@@ -122,7 +122,7 @@ function serializeProject() {
     objects: S.objects.map((o) => ({
       id: o.id, name: o.name, pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(),
       modifiers: normalizeModifiers(o.modifiers), materials: o.materials, visible: o.visible, selected: o.selected,
-      mesh: { verts: o.mesh.verts, faces: o.mesh.faces, looseEdges: o.mesh.looseEdges, seams: [...o.mesh.seams], smooth: o.mesh.smooth },
+      mesh: { verts: o.mesh.verts, faces: o.mesh.faces, looseEdges: o.mesh.looseEdges, seams: [...o.mesh.seams], creases: [...(o.mesh.creases || [])], smooth: o.mesh.smooth },
     })),
     materials: S.materials,
     images: [...S.images.values()].filter((im) => used.has(im.id)).map((im) => ({ id: im.id, name: im.name, mime: im.mime, data: b64FromBytes(im.bytes) })),
@@ -145,7 +145,7 @@ async function loadProject(data) {
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
   for (const so of data.objects) {
-    const mesh = { verts: so.mesh.verts || [], faces: (so.mesh.faces || []).map((f) => ({ v: f.v, uv: f.uv || f.v.map(() => [0, 0]), mat: f.mat | 0 })), looseEdges: so.mesh.looseEdges || [], seams: new Set(so.mesh.seams || []), smooth: !!so.mesh.smooth };
+    const mesh = { verts: so.mesh.verts || [], faces: (so.mesh.faces || []).map((f) => ({ v: f.v, uv: f.uv || f.v.map(() => [0, 0]), mat: f.mat | 0 })), looseEdges: so.mesh.looseEdges || [], seams: new Set(so.mesh.seams || []), creases: new Set(so.mesh.creases || []), smooth: !!so.mesh.smooth };
     const o = createObject(so.name, mesh, { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials || [], modifiers: so.modifiers, id: so.id, keepName: true });
     o.visible = so.visible !== false; o.selected = !!so.selected;
   }

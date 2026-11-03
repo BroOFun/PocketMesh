@@ -320,7 +320,7 @@ const vlerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, 
 const uvlerp = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
 
 function newMesh() {
-  return { verts: [], faces: [], looseEdges: [], seams: new Set(), smooth: false };
+  return { verts: [], faces: [], looseEdges: [], seams: new Set(), creases: new Set(), smooth: false };
 }
 function ekey(a, b) { return a < b ? a + '_' + b : b + '_' + a; }
 function ekeySplit(k) { const i = k.indexOf('_'); return [+k.slice(0, i), +k.slice(i + 1)]; }
@@ -331,9 +331,13 @@ function cloneMesh(m) {
     faces: m.faces.map((f) => ({ v: f.v.slice(), uv: f.uv.map((u) => [u[0], u[1]]), mat: f.mat | 0 })),
     looseEdges: m.looseEdges.map((e) => [e[0], e[1]]),
     seams: new Set(m.seams),
+    creases: new Set(m.creases || []),
     smooth: !!m.smooth,
   };
 }
+
+// Edge attributes share the same remapping rules through topology edits.
+function edgeTagSets(m) { return [m.seams, m.creases ||= new Set()]; }
 
 // ---------- topology cache ----------
 function topo(m) {
@@ -377,7 +381,7 @@ function cleanEdges(m) {
     if (faceEdges.has(k) || seen.has(k)) return false;
     seen.add(k); return true;
   });
-  for (const k of [...m.seams]) if (!faceEdges.has(k) && !seen.has(k)) m.seams.delete(k);
+  for (const tags of edgeTagSets(m)) for (const k of [...tags]) if (!faceEdges.has(k) && !seen.has(k)) tags.delete(k);
   touch(m);
 }
 
@@ -491,7 +495,7 @@ function vertexNormals(m) {
 // ---------- primitives (all Z-up, centered at origin, with UVs) ----------
 function _face(v, uv, mat = 0) { return { v, uv, mat }; }
 function _mesh(verts, faces, looseEdges = [], seams = []) {
-  return { verts, faces, looseEdges, seams: new Set(seams), smooth: false };
+  return { verts, faces, looseEdges, seams: new Set(seams), creases: new Set(), smooth: false };
 }
 
 function primPlane({ size = 2 } = {}) {
@@ -737,9 +741,11 @@ function removeVerts(m, vset) {
   m.verts = nv;
   for (const f of m.faces) f.v = f.v.map((v) => remap[v]);
   m.looseEdges = m.looseEdges.map((e) => [remap[e[0]], remap[e[1]]]);
-  const seams = new Set();
-  for (const k of m.seams) { const [a, b] = ekeySplit(k); if (remap[a] >= 0 && remap[b] >= 0) seams.add(ekey(remap[a], remap[b])); }
-  m.seams = seams;
+  for (const tags of edgeTagSets(m)) {
+    const next = new Set();
+    for (const k of tags) { const [a, b] = ekeySplit(k); if (remap[a] >= 0 && remap[b] >= 0) next.add(ekey(remap[a], remap[b])); }
+    tags.clear(); for (const k of next) tags.add(k);
+  }
   touch(m);
   return remap;
 }
@@ -782,10 +788,9 @@ function extrudeRegion(m, sel) {
     }
   }
   // seams inside the region follow the moved faces
-  const seamAdd = [];
-  for (const k of m.seams) if (faceEdgeKeys.has(k)) { const [a, b] = ekeySplit(k); seamAdd.push([a, b]); }
+  const tagAdd = edgeTagSets(m).map((tags) => [tags, [...tags].filter((k) => faceEdgeKeys.has(k)).map(ekeySplit)]);
   for (const fi of F) { const f = m.faces[fi]; f.v = f.v.map(dup); }
-  for (const [a, b] of seamAdd) m.seams.add(ekey(newOf.get(a), newOf.get(b)));
+  for (const [tags, edges] of tagAdd) for (const [a, b] of edges) tags.add(ekey(newOf.get(a), newOf.get(b)));
   // lone edges
   const edgeVerts = new Set();
   for (const k of sel.edges) {
@@ -848,7 +853,7 @@ function duplicateSel(m, sel) {
   }
   for (const k of sel.edges) if (!faceEdge.has(k)) { const [a, b] = ekeySplit(k); m.looseEdges.push([dup(a), dup(b)]); }
   for (const v of sel.verts) dup(v);
-  for (const k of [...m.seams]) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b) && faceEdge.has(k)) m.seams.add(ekey(map.get(a), map.get(b))); }
+  for (const tags of edgeTagSets(m)) for (const k of [...tags]) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b) && faceEdge.has(k)) tags.add(ekey(map.get(a), map.get(b))); }
   touch(m);
   return { verts: new Set(map.values()) };
 }
@@ -1035,7 +1040,7 @@ function loopCut(m, ring, cuts = 1, slide = 0) {
   // split seams
   E.forEach(([s, t], i) => {
     const k = ekey(s, t);
-    if (m.seams.has(k)) { m.seams.delete(k); const chain = [s, ...newV[i], t]; for (let q = 0; q < chain.length - 1; q++) m.seams.add(ekey(chain[q], chain[q + 1])); }
+    for (const tags of edgeTagSets(m)) if (tags.has(k)) { tags.delete(k); const chain = [s, ...newV[i], t]; for (let q = 0; q < chain.length - 1; q++) tags.add(ekey(chain[q], chain[q + 1])); }
   });
   touch(m);
   return { verts: out };
@@ -1079,7 +1084,7 @@ function subdivide(m, F) {
       }
     }
   }
-  for (const k of [...m.seams]) if (mid.has(k)) { const [a, b] = ekeySplit(k); const c = mid.get(k); m.seams.delete(k); m.seams.add(ekey(a, c)); m.seams.add(ekey(c, b)); }
+  for (const tags of edgeTagSets(m)) for (const k of [...tags]) if (mid.has(k)) { const [a, b] = ekeySplit(k); const c = mid.get(k); tags.delete(k); tags.add(ekey(a, c)); tags.add(ekey(c, b)); }
   // loose edges that got a midpoint
   m.looseEdges = m.looseEdges.flatMap(([a, b]) => { const k = ekey(a, b); return mid.has(k) ? [[a, mid.get(k)], [mid.get(k), b]] : [[a, b]]; });
   touch(m);
@@ -1112,9 +1117,11 @@ function applyVertMap(m, map) {
   }
   m.faces = keep;
   m.looseEdges = m.looseEdges.map(([a, b]) => [tgt(a), tgt(b)]);
-  const seams = new Set();
-  for (const k of m.seams) { const [a, b] = ekeySplit(k); const ta = tgt(a), tb = tgt(b); if (ta !== tb) seams.add(ekey(ta, tb)); }
-  m.seams = seams;
+  for (const tags of edgeTagSets(m)) {
+    const next = new Set();
+    for (const k of tags) { const [a, b] = ekeySplit(k); const ta = tgt(a), tb = tgt(b); if (ta !== tb) next.add(ekey(ta, tb)); }
+    tags.clear(); for (const k of next) tags.add(k);
+  }
   touch(m);
   const rm = new Set(); for (const [v, t] of map) if (v !== t) rm.add(v);
   const remap = removeVerts(m, rm);
@@ -1760,7 +1767,9 @@ function appendMesh(dst, src, xf /* function(p)->p or null */, matOffsetMap /* s
   for (const p of src.verts) dst.verts.push(xf ? xf(p) : p.slice());
   for (const f of src.faces) dst.faces.push(_face(f.v.map((v) => v + off), f.uv.map((u) => u.slice()), matOffsetMap ? matOffsetMap(f.mat) : f.mat));
   for (const [a, b] of src.looseEdges) dst.looseEdges.push([a + off, b + off]);
-  for (const k of src.seams) { const [a, b] = ekeySplit(k); dst.seams.add(ekey(a + off, b + off)); }
+  for (const name of ['seams', 'creases']) { dst[name] ||= new Set();
+    for (const k of (src[name] || [])) { const [a, b] = ekeySplit(k); dst[name].add(ekey(a + off, b + off)); }
+  }
   touch(dst);
   const out = new Set(); for (let i = 0; i < src.verts.length; i++) out.add(off + i);
   return out;
@@ -1774,7 +1783,9 @@ function extractPart(m, vset) {
   m.faces.forEach((f, fi) => { if (f.v.every((v) => vset.has(v))) { takeF.add(fi); part.faces.push(_face(f.v.map(mp), f.uv.map((u) => u.slice()), f.mat)); } });
   for (const [a, b] of m.looseEdges) if (vset.has(a) && vset.has(b)) part.looseEdges.push([mp(a), mp(b)]);
   for (const v of vset) mp(v);
-  for (const k of m.seams) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b)) part.seams.add(ekey(map.get(a), map.get(b))); }
+  for (const name of ['seams', 'creases']) {
+    for (const k of (m[name] || [])) { const [a, b] = ekeySplit(k); if (map.has(a) && map.has(b)) part[name].add(ekey(map.get(a), map.get(b))); }
+  }
   part.smooth = m.smooth;
   // remove from source: faces taken, then verts no longer used that are in vset
   m.faces = m.faces.filter((_, fi) => !takeF.has(fi));
@@ -1797,7 +1808,9 @@ function extractFaces(m, fset) {
     part.faces.push(_face(f.v.map(mp), f.uv.map((u) => u.slice()), f.mat));
     for (let i = 0; i < f.v.length; i++) fe.add(ekey(f.v[i], f.v[(i + 1) % f.v.length]));
   });
-  for (const k of m.seams) if (fe.has(k)) { const [a, b] = ekeySplit(k); part.seams.add(ekey(map.get(a), map.get(b))); }
+  for (const name of ['seams', 'creases']) {
+    for (const k of (m[name] || [])) if (fe.has(k)) { const [a, b] = ekeySplit(k); part[name].add(ekey(map.get(a), map.get(b))); }
+  }
   part.smooth = m.smooth;
   m.faces = m.faces.filter((_, fi) => !fset.has(fi));
   touch(m);
@@ -1818,10 +1831,11 @@ function normalizeModifiers(modifiers = []) {
     type: 'subdivision', enabled: m.enabled !== false,
     levels: Math.max(0, Math.min(3, Math.round(Number(m.levels) || 0))),
     method: m.method === 'simple' ? 'simple' : 'catmull-clark',
+    boundary: ['keep-corners', 'keep-boundary'].includes(m.boundary) ? m.boundary : 'smooth',
   }));
 }
 
-function subdivisionSurface(mesh, levels = 1, method = 'catmull-clark') {
+function subdivisionSurface(mesh, levels = 1, method = 'catmull-clark', boundaryMode = 'smooth') {
   if (!Number.isInteger(levels) || levels < 0 || levels > 3) throw new Error('Subdivision supports levels 0–3');
   let m = mesh;
   for (let level = 0; level < levels; level++) {
@@ -1830,14 +1844,19 @@ function subdivisionSurface(mesh, levels = 1, method = 'catmull-clark') {
     const t = topo(m), fp = m.faces.map((f) => faceCenter(m, f));
     const mid = t.edges.map(([a, b]) => vlerp(m.verts[a], m.verts[b], 0.5));
     const simple = method === 'simple';
+    const sharp = t.edges.map(([a, b], ei) => t.edgeFaces[ei].length === 1 || !!m.creases?.has(ekey(a, b)));
     const verts = m.verts.map((p, vi) => {
       if (simple || !t.vertFaces[vi].length) return p.slice();
       const es = t.vertEdges[vi], fs = t.vertFaces[vi];
-      // Keep non-manifold junctions fixed; open boundaries use the cubic rule.
+      // Infinitely sharp creases use the cubic crease rule. Three or more
+      // incident sharp edges form a fixed corner; a single edge is a dart.
       if (es.some((ei) => t.edgeFaces[ei].length > 2 || !t.edgeFaces[ei].length)) return p.slice();
       const boundary = es.filter((ei) => t.edgeFaces[ei].length === 1);
-      if (boundary.length === 2) {
-        const ns = boundary.map((ei) => m.verts[t.edges[ei].find((v) => v !== vi)]);
+      if (boundary.length && (boundaryMode === 'keep-boundary' || (boundaryMode === 'keep-corners' && fs.length === 1))) return p.slice();
+      const crease = es.filter((ei) => sharp[ei]);
+      if (crease.length >= 3) return p.slice();
+      if (crease.length === 2) {
+        const ns = crease.map((ei) => m.verts[t.edges[ei].find((v) => v !== vi)]);
         return vadd(vscale(p, 0.75), vscale(vadd(ns[0], ns[1]), 0.125));
       }
       if (boundary.length || fs.length !== es.length) return p.slice();
@@ -1849,7 +1868,7 @@ function subdivisionSurface(mesh, levels = 1, method = 'catmull-clark') {
     const edgeBase = verts.length;
     t.edges.forEach((_, ei) => {
       const fs = t.edgeFaces[ei];
-      verts.push(!simple && fs.length === 2 ? vscale(vadd(vscale(mid[ei], 2), vadd(fp[fs[0]], fp[fs[1]])), 0.25) : mid[ei]);
+      verts.push(!simple && !sharp[ei] && fs.length === 2 ? vscale(vadd(vscale(mid[ei], 2), vadd(fp[fs[0]], fp[fs[1]])), 0.25) : mid[ei]);
     });
     const faceBase = verts.length;
     verts.push(...fp);
@@ -1863,21 +1882,38 @@ function subdivisionSurface(mesh, levels = 1, method = 'catmull-clark') {
           uv: [uv[i].slice(), uvlerp(uv[i], uv[next], 0.5), center.slice(), uvlerp(uv[prev], uv[i], 0.5)], mat: f.mat });
       }
     });
-    const seams = new Set(), looseEdges = [];
+    const seams = new Set(), creases = new Set(), looseEdges = [];
     t.edges.forEach(([a, b], ei) => {
       const v = edgeBase + ei;
       if (m.seams.has(ekey(a, b))) { seams.add(ekey(a, v)); seams.add(ekey(v, b)); }
+      if (m.creases?.has(ekey(a, b))) { creases.add(ekey(a, v)); creases.add(ekey(v, b)); }
       if (!t.edgeFaces[ei].length) looseEdges.push([a, v], [v, b]);
     });
-    m = { verts, faces, looseEdges, seams, smooth: simple ? m.smooth : true };
+    m = { verts, faces, looseEdges, seams, creases, smooth: simple ? m.smooth : true };
   }
   return m;
 }
 
 function evaluateModifiers(mesh, modifiers) {
   let result = mesh;
-  for (const m of normalizeModifiers(modifiers)) if (m.enabled) result = subdivisionSurface(result, m.levels, m.method);
+  for (const m of normalizeModifiers(modifiers)) if (m.enabled) result = subdivisionSurface(result, m.levels, m.method, m.boundary);
   return result;
+}
+
+function markFaceCreases(mesh, selectedFaces, mark = true) {
+  mesh.creases ||= new Set();
+  let changed = 0;
+  for (const fi of selectedFaces) {
+    const f = mesh.faces[fi];
+    if (!f) continue;
+    for (let i = 0; i < f.v.length; i++) {
+      const key = ekey(f.v[i], f.v[(i + 1) % f.v.length]);
+      if (mesh.creases.has(key) === mark) continue;
+      if (mark) mesh.creases.add(key); else mesh.creases.delete(key);
+      changed++;
+    }
+  }
+  return changed;
 }
 
 // ==== materials.js ====
@@ -3788,6 +3824,38 @@ function _exNormalize(v, fallback) {
   return [v[0] / l, v[1] / l, v[2] / l];
 }
 
+// Area-weighted corner normals, splitting smoothing across marked crease edges.
+// Shared by viewport and all exporters so an applied crease shades consistently.
+function _exSmoothCornerNormals(verts, faces, creases) {
+  const offsets = [], parent = [], edges = new Map();
+  const key = (a, b) => a < b ? a + '_' + b : b + '_' + a;
+  for (const f of faces) {
+    const base = parent.length; offsets.push(base);
+    for (let i = 0; i < f.v.length; i++) parent.push(base + i);
+    for (let i = 0; i < f.v.length; i++) {
+      const j = (i + 1) % f.v.length, a = f.v[i], b = f.v[j], k = key(a, b);
+      if (creases.has(k)) continue;
+      if (!edges.has(k)) edges.set(k, []);
+      edges.get(k).push(a < b ? [base + i, base + j] : [base + j, base + i]);
+    }
+  }
+  const root = (i) => { while (parent[i] !== i) { parent[i] = parent[parent[i]]; i = parent[i]; } return i; };
+  for (const pair of edges.values()) if (pair.length === 2) {
+    for (let k = 0; k < 2; k++) parent[root(pair[1][k])] = root(pair[0][k]);
+  }
+  const sums = new Map();
+  faces.forEach((f, fi) => {
+    const n = _exNewell(f.v.map((v) => verts[v]));
+    f.v.forEach((_, i) => {
+      const r = root(offsets[fi] + i), sum = sums.get(r) || [0, 0, 0];
+      for (let k = 0; k < 3; k++) sum[k] += n[k];
+      sums.set(r, sum);
+    });
+  });
+  for (const [r, n] of sums) sums.set(r, _exNormalize(n));
+  return faces.map((f, fi) => f.v.map((_, i) => sums.get(root(offsets[fi] + i))));
+}
+
 // Triangulate a polygon (array of 3D points). Returns [[i,j,k], ...] with local indices,
 // keeping the polygon's winding. Ear clipping on the projection onto the Newell plane.
 function _exTriangulate(pts, normal) {
@@ -4013,11 +4081,12 @@ function _exPrepare(scene, o) {
       if (smooth) for (const i of f.v) { const a = vnAcc[i]; a[0] += nw[0]; a[1] += nw[1]; a[2] += nw[2]; }
     }
     const vn = smooth ? vnAcc.map((a) => (Math.hypot(a[0], a[1], a[2]) > 1e-20 ? _exNormalize(a, null) : null)) : null;
+    const cn = smooth && mesh.creases?.size ? _exSmoothCornerNormals(pos, faces, mesh.creases) : null;
     // Unique normals / UVs per object (exact values); corners reference them by integer id.
     const normals = [], uvs = [];
     const nMap = new Map(), uvMap = new Map();
     const vnId = smooth ? new Int32Array(nv).fill(-1) : null;
-    for (const f of faces) {
+    for (const [fi, f] of faces.entries()) {
       const len = f.v.length;
       f.n = new Array(len);
       f.nid = new Array(len);
@@ -4025,7 +4094,10 @@ function _exPrepare(scene, o) {
       let fid = -1;
       for (let k = 0; k < len; k++) {
         const vi = f.v[k];
-        if (smooth && vn[vi]) {
+        if (cn) {
+          f.n[k] = cn[fi][k];
+          f.nid[k] = _exId3(nMap, normals, f.n[k]);
+        } else if (smooth && vn[vi]) {
           f.n[k] = vn[vi];
           if (vnId[vi] < 0) vnId[vi] = _exId3(nMap, normals, vn[vi]);
           f.nid[k] = vnId[vi];
@@ -6993,12 +7065,13 @@ function rebuildObject(o) {
 }
 function updateGeomPositions(o, skipOverlays) {
   if (!skipOverlays && S.mode !== 'edit' && o.modifiers.some((m) => m.enabled && m.levels)) { rebuildObject(o); return; }
-  const m = o.renderMesh || o.mesh, P = m.verts, { cornerV, cornerF } = o.rd, geo = o.meshNode.geometry;
+  const m = o.renderMesh || o.mesh, P = m.verts, { cornerV, cornerF, cornerC } = o.rd, geo = o.meshNode.geometry;
   const pos = geo.attributes.position.array, nor = geo.attributes.normal.array;
   for (let i = 0; i < cornerV.length; i++) { const p = P[cornerV[i]]; pos[i * 3] = p[0]; pos[i * 3 + 1] = p[1]; pos[i * 3 + 2] = p[2]; }
   if (m.smooth) {
-    const VN = vertexNormals(m);
-    for (let i = 0; i < cornerV.length; i++) { const n = VN[cornerV[i]]; nor[i * 3] = n[0]; nor[i * 3 + 1] = n[1]; nor[i * 3 + 2] = n[2]; }
+    const CN = m.creases?.size ? _exSmoothCornerNormals(P, m.faces, m.creases) : null;
+    const VN = CN ? null : vertexNormals(m);
+    for (let i = 0; i < cornerV.length; i++) { const n = CN ? CN[cornerF[i]][cornerC[i]] : VN[cornerV[i]]; nor[i * 3] = n[0]; nor[i * 3 + 1] = n[1]; nor[i * 3 + 2] = n[2]; }
   } else {
     const FN = m.faces.map((f) => faceNormal(m, f));
     for (let i = 0; i < cornerV.length; i++) { const n = FN[cornerF[i]]; nor[i * 3] = n[0]; nor[i * 3 + 1] = n[1]; nor[i * 3 + 2] = n[2]; }
@@ -7022,6 +7095,7 @@ function updateGeomUVs(o, fromRebuild = false) {
 const COL = {
   sel: [1, 0.616, 0.227], active: [1, 1, 1], dark: [0.04, 0.045, 0.055], wire: [0.62, 0.65, 0.71], seam: [1, 0.22, 0.25],
   objSel: [0.93, 0.5, 0.12], objAct: [1, 0.72, 0.33], fdot: [0.06, 0.06, 0.07],
+  crease: [0.92, 0.22, 0.85],
 };
 function setLineGeo(o, key, positions, colors, mat) {
   if (!positions.length) { if (o[key]) o[key].visible = false; return; }
@@ -7075,16 +7149,17 @@ function refreshOverlays(o) {
       let c = base;
       if (editing) {
         const k = a + '_' + b;
+        if (m.creases?.has(k)) c = COL.crease;
         if (S.selectMode === 'vert') {
           const sa = s.verts.has(a), sb = s.verts.has(b);
           if (sa && sb) c = COL.sel;
-          else if (m.seams.has(k)) c = COL.seam;
+          else if (!m.creases?.has(k) && m.seams.has(k)) c = COL.seam;
           if ((sa || sb) && !(sa && sb)) {
             col.set(sa ? COL.sel : c, i * 6); col.set(sb ? COL.sel : c, i * 6 + 3);
             return;
           }
         } else if (s.edges.has(k)) c = COL.sel;
-        else if (m.seams.has(k)) c = COL.seam;
+        else if (!m.creases?.has(k) && m.seams.has(k)) c = COL.seam;
       }
       col.set(c, i * 6); col.set(c, i * 6 + 3);
     });
@@ -7435,7 +7510,7 @@ function selectObject(o, op = 'set') {
   if (op === 'set') for (const x of S.objects) x.selected = false;
   if (!o) { if (op === 'set') S.active = S.active; onSelectionChanged(); return; }
   if (op === 'sub') { o.selected = false; if (S.active === o) S.active = S.objects.find((x) => x.selected) || o; }
-  else if (op === 'add' && o.selected && S.active === o) { o.selected = false; }
+  else if (op === 'add' && o.selected) { o.selected = false; if (S.active === o) S.active = S.objects.find((x) => x.selected && x.visible) || o; }
   else { o.selected = true; S.active = o; }
   onSelectionChanged();
 }
@@ -9292,7 +9367,7 @@ function serializeProject() {
     objects: S.objects.map((o) => ({
       id: o.id, name: o.name, pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(),
       modifiers: normalizeModifiers(o.modifiers), materials: o.materials, visible: o.visible, selected: o.selected,
-      mesh: { verts: o.mesh.verts, faces: o.mesh.faces, looseEdges: o.mesh.looseEdges, seams: [...o.mesh.seams], smooth: o.mesh.smooth },
+      mesh: { verts: o.mesh.verts, faces: o.mesh.faces, looseEdges: o.mesh.looseEdges, seams: [...o.mesh.seams], creases: [...(o.mesh.creases || [])], smooth: o.mesh.smooth },
     })),
     materials: S.materials,
     images: [...S.images.values()].filter((im) => used.has(im.id)).map((im) => ({ id: im.id, name: im.name, mime: im.mime, data: b64FromBytes(im.bytes) })),
@@ -9315,7 +9390,7 @@ async function loadProject(data) {
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
   for (const so of data.objects) {
-    const mesh = { verts: so.mesh.verts || [], faces: (so.mesh.faces || []).map((f) => ({ v: f.v, uv: f.uv || f.v.map(() => [0, 0]), mat: f.mat | 0 })), looseEdges: so.mesh.looseEdges || [], seams: new Set(so.mesh.seams || []), smooth: !!so.mesh.smooth };
+    const mesh = { verts: so.mesh.verts || [], faces: (so.mesh.faces || []).map((f) => ({ v: f.v, uv: f.uv || f.v.map(() => [0, 0]), mat: f.mat | 0 })), looseEdges: so.mesh.looseEdges || [], seams: new Set(so.mesh.seams || []), creases: new Set(so.mesh.creases || []), smooth: !!so.mesh.smooth };
     const o = createObject(so.name, mesh, { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials || [], modifiers: so.modifiers, id: so.id, keepName: true });
     o.visible = so.visible !== false; o.selected = !!so.selected;
   }
@@ -11151,6 +11226,18 @@ function buildSubbar() {
     bar.append(chip('Ruler', 'Settings', openRuler, {icon:'ruler'}), chip('', 'Snap', () => { S.ruler.snap = !S.ruler.snap; pushUndo('Ruler snap'); buildSubbar(); }, {on:S.ruler.snap,icon:'magnet',aria:'Ruler snapping'}), chip('', S.ruler.unit, openRuler, {aria:'Measurement units'}), chip('', 'Done', rulerDone));
     return;
   }
+  if (S.creaseEdit === S.active?.id && S.mode === 'edit') {
+    bar.prepend(chip('', 'Mark Creases', () => changeSelectedCreases(true)),
+      chip('', 'Remove Creases', () => changeSelectedCreases(false)),
+      chip('', 'Done · Preview', finishCreases, {on: true, aria: 'Done editing creases'}));
+    return;
+  }
+  bar.append(chip('Multiselect', S.multiSelect ? 'Done' : '', () => {
+    S.multiSelect = !S.multiSelect; S.selOp = S.multiSelect ? 'add' : 'set';
+    if (S.multiSelect) { S.tool = 'select'; S.pendingTap = null; buildTools(); gizmoSync(); }
+    hint(S.multiSelect ? 'Multiselect · tap objects or mesh elements to add/remove · Done to finish' : null);
+    buildSubbar();
+  }, { on: S.multiSelect, aria: 'Multiselect' }));
   bar.append(
     chip('Orient', ORIENT.find((x) => x[0] === S.orient)[1], () => menuSheet('Transform Orientation', ORIENT.map(([k, l]) => ({ label: l, icon: k === S.orient ? 'check' : 'dots', desc: { global: 'World X / Y / Z axes', local: "The active object's own axes", normal: 'Aligned to the selection surface (edit mode)', view: 'Aligned to the screen' }[k], run: () => { S.orient = k; settingsSet('orient', k); buildSubbar(); gizmoSync(); } })))),
     chip('Pivot', PIVOT.find((x) => x[0] === S.pivot)[1], () => menuSheet('Pivot Point', PIVOT.map(([k, l]) => ({ label: l, icon: k === S.pivot ? 'check' : 'dots', run: () => { S.pivot = k; settingsSet('pivot', k); buildSubbar(); gizmoSync(); } })))),
@@ -11166,7 +11253,6 @@ function buildSubbar() {
     b.addEventListener('click', () => { S.selOp = k; S.multiSelect = false; hint(null); buildSubbar(); });
     seg.append(b);
   }
-  if (S.multiSelect) bar.append(chip('Multiselect', 'Done', () => { S.multiSelect = false; S.selOp = 'set'; hint(null); buildSubbar(); }, { on: true }));
   bar.append(seg, h('span', { class: 'vsep' }), chip('', '', () => openSettings(), { icon: 'sliders', aria: 'Settings' }));
 }
 
@@ -11600,6 +11686,28 @@ function buildOutliner(body) {
   }
 }
 function openModifiers() { openSheet('Modifiers', buildModifiers, { panel: true, kind: 'modifiers' }); }
+function beginCreases(o) {
+  closeSheet();
+  if (S.workspace !== 'model') setWorkspace('model');
+  if (S.view !== '3d') setWorkView('3d');
+  S.active = o; o.selected = true; S.tool = 'select'; S.pendingTap = null;
+  setMode('edit'); setSelectMode('face');
+  o.esel = emptySel(); o.activeFace = -1;
+  S.creaseEdit = o.id; S.multiSelect = true; S.selOp = 'add';
+  buildTools(); buildSubbar(); onSelectionChanged();
+  hint('Select faces → Mark Creases → Done · Preview. All edges of each selected face will be creased.');
+}
+function changeSelectedCreases(mark) {
+  const o = S.active;
+  if (!o || S.mode !== 'edit' || !o.esel.faces.size) { toast('Select one or more faces first', true); return; }
+  const count = markFaceCreases(o.mesh, o.esel.faces, mark);
+  if (count) { rebuildObject(o); pushUndo(mark ? 'Mark Creases' : 'Remove Creases'); onSelectionChanged(); }
+  toast(count ? `${count} edge${count === 1 ? '' : 's'} ${mark ? 'creased' : 'uncreased'}` : 'No crease changes');
+}
+function finishCreases() {
+  S.creaseEdit = null; S.multiSelect = false; S.selOp = 'set'; hint(null);
+  setMode('object'); buildSubbar(); openModifiers();
+}
 function changeModifiers(o, next, label) {
   try {
     evaluateModifiers(o.mesh, next); // Validate the allocation before changing state.
@@ -11614,14 +11722,22 @@ function buildModifiers(body) {
   const m = o.modifiers[0];
   if (!m) {
     const add = h('button', { class: 'btn primary' }, h('span', { html: icon('plus') }), 'Add Subdivision Surface');
-    add.addEventListener('click', () => changeModifiers(o, [{ type: 'subdivision', levels: 1 }], 'Add Subdivision Surface'));
+    add.addEventListener('click', () => changeModifiers(o, [{ type: 'subdivision', levels: 1, boundary: 'keep-corners' }], 'Add Subdivision Surface'));
     body.append(add);
   } else {
     const change = (key, value) => changeModifiers(o, [{ ...o.modifiers[0], [key]: value }], 'Subdivision Settings');
     const card = h('div', { class: 'card' }, h('h3', {}, 'Subdivision Surface'),
       field('Method', selectInput(m.method, [['catmull-clark', 'Catmull–Clark'], ['simple', 'Simple']], (v) => change('method', v), 'Subdivision method')),
       field('Levels', selectInput(m.levels, [0, 1, 2, 3].map((v) => [v, String(v)]), (v) => change('levels', +v), 'Subdivision levels')),
+      field('Boundary', selectInput(m.boundary, [['smooth', 'Smooth'], ['keep-corners', 'Keep Corners'], ['keep-boundary', 'Keep All Boundary Edges']], (v) => change('boundary', v), 'Subdivision boundary')),
       checkInput('Enabled in Object Mode and exports', m.enabled, (v) => change('enabled', v)));
+    const crease = h('button', { class: 'btn' }, 'Add Creases');
+    crease.addEventListener('click', () => beginCreases(o));
+    const clear = h('button', { class: 'btn', disabled: !o.mesh.creases?.size }, 'Clear All Creases');
+    clear.addEventListener('click', () => { o.mesh.creases.clear(); rebuildObject(o); pushUndo('Clear Creases'); onSelectionChanged(); });
+    card.append(h('p', {class: 'muted'}, 'Keep Corners fixes boundary vertices touching one face. Keep All Boundary Edges preserves the whole outline. Simple subdivision already preserves the shape.'),
+      h('div', {class: 'row'}, crease, clear),
+      h('p', {class: 'muted'}, `${o.mesh.creases?.size || 0} creased edges · Add Creases lets you select faces and mark their edges sharp. Magenta edges show creases in Edit Mode.`));
     const apply = h('button', { class: 'btn primary', disabled: S.mode !== 'object' || !m.enabled }, 'Apply to mesh');
     apply.addEventListener('click', () => {
       try { const mesh = evaluateModifiers(o.mesh, o.modifiers); o.mesh = mesh; o.modifiers = []; o.esel = emptySel(); o.activeFace = -1; S.uvSel.clear(); rebuildObject(o); pushUndo('Apply Subdivision'); onSelectionChanged(); }
@@ -11969,6 +12085,7 @@ onSelectionChanged = () => {
   refreshSheet();
 };
 onModeChanged = () => {
+  if (S.creaseEdit && (S.mode !== 'edit' || S.active?.id !== S.creaseEdit || S.workspace !== 'model')) { S.creaseEdit = null; S.multiSelect = false; S.selOp = 'set'; hint(null); }
   buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
   $('#selModes').hidden = S.workspace !== 'model' || S.mode !== 'edit';
@@ -11991,14 +12108,14 @@ const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastT
 function cancelHold() { clearTimeout(G.holdTimer); G.holdTimer = null; }
 function beginHold(e, p) {
   cancelHold();
-  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
-  const object = S.active, mode = S.mode, selectMode = S.selectMode;
+  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || !['select', 'move', 'rotate', 'scale'].includes(S.tool)) return;
+  const object = S.active, mode = S.mode, selectMode = S.selectMode, tool = S.tool;
   G.holdTimer = setTimeout(() => {
-    if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+    if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== tool) return;
     const el = S.mode === 'edit' && S.active ? pickElement(p.x, p.y, e.pointerType === 'mouse' ? 14 : 28) : null;
     const ob = S.mode === 'object' ? pickObject(p.x, p.y) : null;
     if (!el && !ob) return;
-    S.selOp = 'add'; S.multiSelect = true;
+    S.selOp = 'add'; S.multiSelect = true; S.tool = 'select'; buildTools();
     if (el) {
       // A hold always adds its target; subsequent taps toggle it.
       const selected = el.type === 'vert' ? object.esel.verts.has(el.i) : el.type === 'edge' ? object.esel.edges.has(el.key) : object.esel.faces.has(el.i);

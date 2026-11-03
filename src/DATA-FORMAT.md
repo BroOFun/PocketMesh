@@ -23,6 +23,7 @@ mesh = {
             mat: 0 }],                // material slot index into object.materials
   looseEdges: [[a, b], ...],          // wire edges not used by any face (often empty)
   seams: Set<string>,                 // UV seam edge keys, `${Math.min(a,b)}_${Math.max(a,b)}`
+  creases: Set<string>,               // optional, infinitely sharp subdivision edge keys
   smooth: false                       // true: smooth shading, false: flat (face normals)
 }
 ```
@@ -73,7 +74,7 @@ default material if the object has none).
 ## Modifier state
 
 Editor objects and saved projects may include
-`modifiers: [{type: 'subdivision', method: 'catmull-clark' | 'simple', levels: 0..3, enabled: true}]`.
+`modifiers: [{type: 'subdivision', method: 'catmull-clark' | 'simple', levels: 0..3, enabled: true, boundary: 'smooth' | 'keep-corners' | 'keep-boundary'}]`.
 Missing modifiers mean an empty stack. The current UI supports one subdivision
 modifier per object. `mesh` always remains the editable control mesh until Apply;
 `renderMesh` is transient evaluated geometry, never serialized. The app evaluates
@@ -107,3 +108,11 @@ immutable and stored with the project to support lossless section preservation.
 New KMP exports contain generated test scaffolding; imported KMP exports patch
 only the first KTPT position/rotation. `workspace` and color-overlay visibility
 are transient UI state.
+
+Creases are stored with the mesh and serialized as edge-key arrays, like seams.
+Missing creases mean an empty set. Subdivision splits each crease into two sharp
+child edges per level; smooth normals split across those edges in the viewport
+and exports. Keep Corners pins boundary vertices with exactly one incident face
+(the OpenSubdiv edge-and-corner rule); Keep All Boundary Edges pins every boundary
+vertex. Old modifiers without a boundary setting retain Smooth; new modifiers
+default to Keep Corners. Simple subdivision leaves original positions unchanged.
