@@ -77,7 +77,23 @@ export function inspectBRRES(input) {
         if (info + 24 > p + size) throw new Error('Truncated MDL0 header');
         r.vertices = u32(info + 16); r.polygons = u32(info + 20);
         const materialField = p + 16 + (version >= 10 ? 8 : 6) * 4;
-        r.materials = u32(materialField) ? dictionary(relative(materialField, p)).map((x) => x.name) : [];
+        r.materialEntries = (u32(materialField) ? dictionary(relative(materialField, p)) : []).map((entry) => {
+          const at = entry.offset, materialSize = u32(at);
+          if (materialSize < 0x34 || at < p || at + materialSize > p + size) throw new Error('Invalid MDL0 material size');
+          const within = (offset, count) => { if (offset < at || offset + count > at + materialSize) throw new Error('Truncated MDL0 material'); };
+          const count = u32(at + 0x2c), samplerTable = relative(at + 0x30, at);
+          if (count > 8) throw new Error('Invalid material texture count');
+          if (count) within(samplerTable, count * 0x34);
+          const samplers = Array.from({ length: count }, (_, i) => {
+            const s = samplerTable + i * 0x34;
+            return { name: string(relative(s, s)), palette: u32(s + 4) ? string(relative(s + 4, s)) : null, slot: u32(s + 0x10) };
+          });
+          const colorAt = at + (version >= 10 ? 0x3f4 : 0x3f0);
+          const color = colorAt + 4 <= at + materialSize ? Array.from(bytes.subarray(colorAt, colorAt + 4)) : null;
+          return { name: entry.name, offset: at, size: materialSize, type: 'Material', model: r.name, modelOffset: p,
+            samplers, color, translucent: !!(u32(at + 0x10) & 0x80000000), cullMode: u32(at + 0x18), tevStages: bytes[at + 0x16] };
+        });
+        r.materials = r.materialEntries.map((m) => m.name);
       }
       resources.push(r);
     }
@@ -86,7 +102,7 @@ export function inspectBRRES(input) {
   const sections = [...new Map(resources.map((r) => [r.offset, r])).values()].sort((a, b) => a.offset - b.offset);
   let end = root + rootSize;
   for (const r of sections) { if (r.offset < end) throw new Error('Overlapping BRRES sections are not supported'); end = r.offset + r.size; }
-  return { bytes, version: v.getUint16(6), length, sectionCount: v.getUint16(14), resources, textures: resources.filter((r) => r.type === 'TEX0'), palettes: resources.filter((r) => r.type === 'PLT0') };
+  return { bytes, version: v.getUint16(6), length, sectionCount: v.getUint16(14), resources, materials: resources.flatMap((r) => r.materialEntries || []), textures: resources.filter((r) => r.type === 'TEX0'), palettes: resources.filter((r) => r.type === 'PLT0') };
 }
 function _be565(n) { const r = n >> 11, g = (n >> 5) & 63, b = n & 31; return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2), 255]; }
 function _be5a3(n) {

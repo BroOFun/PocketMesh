@@ -179,6 +179,9 @@ input[type=color] { width: 100%; height: 34px; border: 1px solid var(--line); bo
 .btn:disabled { opacity: .45; }
 .brres-preview { width: 100%; height: 180px; object-fit: contain; image-rendering: pixelated; border-radius: 8px; background: repeating-conic-gradient(#30343d 0% 25%, #232730 0% 50%) 0 0 / 20px 20px; }
 .brres-error { color: var(--danger); margin: 0; }
+.brres-materials { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px; max-height: 180px; overflow-y: auto; }
+.brres-material { display: grid; gap: 3px; width: 100%; padding: 9px; text-align: left; overflow-wrap: anywhere; background: var(--panel-3); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
+.brres-material .muted { font-size: 12px; }
 .slot { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
 .slot.on { border-color: var(--sel); background: #ff9d3a14; }
 .swatch { width: 30px; height: 30px; border-radius: 7px; border: 1px solid #0006; flex: none; background-size: cover; background-position: center; }
@@ -5516,7 +5519,23 @@ function inspectBRRES(input) {
         if (info + 24 > p + size) throw new Error('Truncated MDL0 header');
         r.vertices = u32(info + 16); r.polygons = u32(info + 20);
         const materialField = p + 16 + (version >= 10 ? 8 : 6) * 4;
-        r.materials = u32(materialField) ? dictionary(relative(materialField, p)).map((x) => x.name) : [];
+        r.materialEntries = (u32(materialField) ? dictionary(relative(materialField, p)) : []).map((entry) => {
+          const at = entry.offset, materialSize = u32(at);
+          if (materialSize < 0x34 || at < p || at + materialSize > p + size) throw new Error('Invalid MDL0 material size');
+          const within = (offset, count) => { if (offset < at || offset + count > at + materialSize) throw new Error('Truncated MDL0 material'); };
+          const count = u32(at + 0x2c), samplerTable = relative(at + 0x30, at);
+          if (count > 8) throw new Error('Invalid material texture count');
+          if (count) within(samplerTable, count * 0x34);
+          const samplers = Array.from({ length: count }, (_, i) => {
+            const s = samplerTable + i * 0x34;
+            return { name: string(relative(s, s)), palette: u32(s + 4) ? string(relative(s + 4, s)) : null, slot: u32(s + 0x10) };
+          });
+          const colorAt = at + (version >= 10 ? 0x3f4 : 0x3f0);
+          const color = colorAt + 4 <= at + materialSize ? Array.from(bytes.subarray(colorAt, colorAt + 4)) : null;
+          return { name: entry.name, offset: at, size: materialSize, type: 'Material', model: r.name, modelOffset: p,
+            samplers, color, translucent: !!(u32(at + 0x10) & 0x80000000), cullMode: u32(at + 0x18), tevStages: bytes[at + 0x16] };
+        });
+        r.materials = r.materialEntries.map((m) => m.name);
       }
       resources.push(r);
     }
@@ -5525,7 +5544,7 @@ function inspectBRRES(input) {
   const sections = [...new Map(resources.map((r) => [r.offset, r])).values()].sort((a, b) => a.offset - b.offset);
   let end = root + rootSize;
   for (const r of sections) { if (r.offset < end) throw new Error('Overlapping BRRES sections are not supported'); end = r.offset + r.size; }
-  return { bytes, version: v.getUint16(6), length, sectionCount: v.getUint16(14), resources, textures: resources.filter((r) => r.type === 'TEX0'), palettes: resources.filter((r) => r.type === 'PLT0') };
+  return { bytes, version: v.getUint16(6), length, sectionCount: v.getUint16(14), resources, materials: resources.flatMap((r) => r.materialEntries || []), textures: resources.filter((r) => r.type === 'TEX0'), palettes: resources.filter((r) => r.type === 'PLT0') };
 }
 function _be565(n) { const r = n >> 11, g = (n >> 5) & 63, b = n & 31; return [(r << 3) | (r >> 2), (g << 2) | (g >> 4), (b << 3) | (b >> 2), 255]; }
 function _be5a3(n) {
@@ -8480,9 +8499,15 @@ function buildExportScene(selectedOnly, brresTextureSize = null) {
     if (!m) return null;
     let texture = null;
     const im = m.texture && m.useTexture !== false ? S.images.get(m.texture) : null;
+    if (brresTextureSize && m.texture && m.useTexture !== false && !im) throw new Error(`Material "${m.name}" is missing its image. Upload the image in Material before exporting.`);
     if (im) {
       let nm = usedTexNames.get(im.id);
-      if (!nm) { nm = im.name; let i = 1; while ([...usedTexNames.values()].includes(nm)) nm = im.name.replace(/(\.[a-z]+)$/i, `_${i++}$1`); usedTexNames.set(im.id, nm); }
+      if (!nm) {
+        const name = String(im.name || 'texture.png'), parts = /^(.*)(\.[a-z0-9]+)$/i.exec(name);
+        nm = name; let i = 1;
+        while ([...usedTexNames.values()].includes(nm)) nm = (parts ? parts[1] : name) + '_' + i++ + (parts ? parts[2] : '');
+        usedTexNames.set(im.id, nm);
+      }
       texture = { name: nm, mime: im.mime, bytes: im.bytes, width: im.width, height: im.height, filter: m.filter };
       if (brresTextureSize) {
         const factor = Math.min(1, brresTextureSize / Math.max(im.width, im.height));
@@ -8695,6 +8720,34 @@ function brresCanvas(image) {
 function brresSize(bytes) { return bytes >= 1048576 ? (bytes/1048576).toFixed(2)+' MiB' : (bytes/1024).toFixed(1)+' KiB'; }
 function openBRRESEditor() { openSheet('BRRES Editor',buildBRRESEditor,{panel:true,kind:'brres'}); }
 function brresEditorError(error) { BRED.error = error.message || String(error); if (SHEET.kind === 'brres') refreshSheet(true); toast(BRED.error,true); }
+function brresSelectResource(value) {
+  BRED.selected = String(value).startsWith('material:') ? String(value) : Number(value);
+  BRED.preview=null; BRED.replacement=null; BRED.error=''; refreshSheet(true);
+}
+function brresMaterialButton(material) {
+  return h('button',{class:'brres-material','aria-label':`Inspect material ${material.name} in ${material.model}`,onclick:() => brresSelectResource('material:'+material.offset)},
+    h('strong',{},material.name),h('span',{class:'muted'},material.model+' · '+(material.samplers.length ? material.samplers.map((s) => s.name).join(', ') : 'No image texture')));
+}
+function buildBRRESMaterial(body, material) {
+  const card=h('div',{class:'card'},h('h3',{},'Material · '+material.name),h('span',{class:'muted'},`Model: ${material.model} · ${brresSize(material.size)}`));
+  card.append(h('span',{class:'muted'},`${material.tevStages} TEV stage${material.tevStages===1?'':'s'} · ${material.translucent?'Translucent':'Opaque draw list'}`));
+  if (material.color) {
+    const [r,g,b,a]=material.color, hex='#'+[r,g,b].map((n) => n.toString(16).padStart(2,'0')).join('');
+    card.append(h('div',{class:'row'},h('span',{'aria-hidden':'true',style:{width:'28px',height:'28px',borderRadius:'6px',background:hex,border:'1px solid var(--line)'}}),h('span',{},`Channel color ${hex} · alpha ${a}/255`)));
+  }
+  card.append(h('h3',{},'Linked textures'));
+  if (!material.samplers.length) card.append(h('p',{class:'muted'},'This material is included in the BRRES without an image texture. Its appearance comes from material/vertex colors and the shader.'));
+  for (const sampler of material.samplers) {
+    const texture=BRED.archive.textures.find((t) => t.name===sampler.name), edit=texture && BRED.changes.get(texture.offset), current=edit||texture;
+    card.append(h('strong',{},sampler.name),h('span',{class:'muted'},`Texture slot ${sampler.slot}`+(sampler.palette?' · Palette: '+sampler.palette:'')));
+    if (texture) {
+      card.append(h('span',{class:'muted'},current.width === undefined ? 'Unsupported texture version' : `${current.width} × ${current.height} px · ${WII_TEXTURE_FORMATS[current.format]||texture.formatName}`));
+      card.append(h('button',{class:'btn',onclick:() => brresSelectResource(texture.offset)},'Open texture '+sampler.name));
+    } else card.append(h('p',{class:'brres-error'},'This texture is referenced by the material but is not embedded in this archive.'));
+  }
+  card.append(h('p',{class:'muted'},'Material and shader settings are preserved. Open a linked texture above to preview, resize or replace its image.'));
+  body.append(card);
+}
 function buildBRRESEditor(body) {
   body.append(h('div',{class:'row'},h('button',{class:'btn primary',onclick:() => $('#fileBRRES').click()},'Open BRRES…'),h('button',{class:'btn',onclick:() => {
     try { const file = runExport('brres',{baseName:'course_model',scale:1,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
@@ -8707,13 +8760,17 @@ function buildBRRESEditor(body) {
     return;
   }
   const counts = new Map(); for (const r of a.resources) counts.set(r.type,(counts.get(r.type)||0)+1);
-  body.append(h('div',{class:'card'},h('strong',{style:{overflowWrap:'anywhere'}},BRED.name),h('span',{class:'muted'},`BRRES v${a.version} · Big endian · ${brresSize(a.bytes.length)}`),h('span',{class:'muted'},[...counts].map(([type,n]) => `${n} ${type}`).join(' · ') || 'Empty archive')));
+  body.append(h('div',{class:'card'},h('strong',{style:{overflowWrap:'anywhere'}},BRED.name),h('span',{class:'muted'},`BRRES v${a.version} · Big endian · ${brresSize(a.bytes.length)}`),h('span',{class:'muted'},[...counts].map(([type,n]) => `${n} ${type}`).join(' · ') || 'Empty archive'),h('span',{class:'muted'},`${a.materials.length} material${a.materials.length===1?'':'s'} inside models`)));
   const exportButton = h('button',{class:'btn primary',onclick:() => {
     try { const bytes = saveBRRESEdits(a,BRED.changes); shareOrDownload(safeFileName(BRED.name.replace(/\.brres$/i,''))+'_edited.brres',bytes); } catch (e) { brresEditorError(e); }
   }},'Save & Send BRRES…');
   body.append(h('div',{class:'row'},exportButton,h('span',{class:'muted','aria-live':'polite'},`${BRED.changes.size} edited texture${BRED.changes.size === 1 ? '' : 's'}`)));
   if (!a.resources.length) return;
-  body.append(field('Resource',selectInput(BRED.selected,a.resources.map((r) => [r.offset,`${r.type} · ${r.name}${BRED.changes.has(r.offset) ? ' *' : ''}`]),(value) => { BRED.selected=Number(value); BRED.preview=null; BRED.replacement=null; BRED.error=''; refreshSheet(true); },'BRRES resource')));
+  if (a.materials.length) body.append(h('div',{class:'card'},h('h3',{},`Materials (${a.materials.length})`),h('div',{class:'brres-materials'},...a.materials.map(brresMaterialButton))));
+  const entries=[...a.resources.map((r) => [r.offset,`${r.type} · ${r.name}${BRED.changes.has(r.offset) ? ' *' : ''}`]),...a.materials.map((m) => ['material:'+m.offset,`Material · ${m.model} / ${m.name}`])];
+  body.append(field('Resource',selectInput(BRED.selected,entries,brresSelectResource,'BRRES resource')));
+  const material=a.materials.find((m) => 'material:'+m.offset===BRED.selected);
+  if (material) { buildBRRESMaterial(body,material); return; }
   const t = a.resources.find((r) => r.offset === BRED.selected); if (!t) return;
   const card = h('div',{class:'card'},h('h3',{style:{overflowWrap:'anywhere'}},t.type+' · '+t.name),h('span',{class:'muted'},`${t.group} · Version ${t.version} · ${brresSize(t.size)}`));
   body.append(card);
@@ -8728,6 +8785,8 @@ function buildBRRESEditor(body) {
   }
   if (t.width === undefined) { card.append(h('p',{class:'muted'},'This TEX0 version is not supported for preview or editing.')); return; }
   const edit = BRED.changes.get(t.offset), current = edit || t;
+  const users=a.materials.filter((m) => m.samplers.some((s) => s.name===t.name));
+  if (users.length) card.append(h('span',{class:'muted',style:{overflowWrap:'anywhere'}},'Used by: '+users.map((m) => m.name).join(', ')));
   card.append(h('span',{},`${current.width} × ${current.height} px · ${WII_TEXTURE_FORMATS[current.format] || t.formatName} (${current.format})`),h('span',{class:'muted'},`${current.mipCount} mip level${current.mipCount === 1 ? '' : 's'} · ${brresSize(edit?.data.length || t.encodedSize || 0)} encoded pixels`));
   if (edit) card.append(h('span',{class:'muted'},`Original: ${t.width} × ${t.height} · ${t.formatName} · ${t.mipCount} levels`));
   if ([8,9,10].includes(t.format) && !edit) {
@@ -9623,6 +9682,9 @@ function buildExport(body) {
   const st = settingsGet('export', { fmt: 'fbx', applyTransforms: false, triangulate: false, yUp: true, zip: false });
   const anySel = selectedObjects().length > 0;
   if (st.selectedOnly === undefined) st.selectedOnly = anySel;
+  // BRRES gets its own explicit scope preference. Old exports automatically
+  // saved selectedOnly=true, which could silently omit the rest of a track.
+  const selectedOnly = st.fmt === 'brres' ? st.brresSelectedOnly === true : st.selectedOnly;
   const save = () => settingsSet('export', st);
   const notes = {
     brres: 'Wii model + textures (course, MDL0 v11). For RiiStudio, BrawlCrate and noclip. A playable track also needs KCL collision, KMP race data and an SZS package.',
@@ -9639,12 +9701,13 @@ function buildExport(body) {
   nameIn.addEventListener('change', () => settingsSet(st.fmt === 'brres' ? 'brresName' : 'exportName', nameIn.value));
   nameIn.addEventListener('keydown', (e) => e.stopPropagation());
   const opts = h('div', { class: 'card' }, h('h3', {}, 'Options'), field('File name', nameIn),
-    checkInput(`Selected objects only${anySel ? '' : ' (nothing selected)'}`, st.selectedOnly && anySel, (v) => { st.selectedOnly = v; save(); }),
+    checkInput(`Selected objects only${anySel ? '' : ' (nothing selected)'}`, selectedOnly && anySel, (v) => { if (st.fmt === 'brres') st.brresSelectedOnly = v; else st.selectedOnly = v; save(); refreshSheet(true); }),
     st.fmt === 'brres' ? null : checkInput('Apply object transforms', st.applyTransforms, (v) => { st.applyTransforms = v; save(); }),
     st.fmt === 'brres' ? null : checkInput('Triangulate faces', st.triangulate || st.fmt === 'glb' || st.fmt === 'gltf', (v) => { st.triangulate = v; save(); }),
     st.fmt === 'brres' || st.fmt === 'glb' || st.fmt === 'gltf' ? null : checkInput('Y axis up (most apps expect this)', st.yUp, (v) => { st.yUp = v; save(); }),
     checkInput('Always wrap in a .zip', st.zip, (v) => { st.zip = v; save(); }));
   if (st.fmt === 'brres') opts.append(
+    h('p', { class: 'muted', id: 'brresScope' }, `${selectedOnly && anySel ? 'Selected visible objects' : 'All visible objects'}: ${S.objects.filter((o) => o.visible && (!(selectedOnly && anySel) || o.selected)).length}. Includes their assigned materials and image textures together in one BRRES. Color-only materials are included too.`),
     field('Wii units per model unit', numInput(st.scale ?? 1, (v) => { st.scale = v; save(); }, { min: 0.001, max: 100000 })),
     field('Maximum texture size', selectInput(st.textureSize || 512, [64, 128, 256, 512, 1024].map((v) => [v, v + ' px']), (v) => { st.textureSize = +v; save(); }, 'BRRES texture size')),
     h('p', { class: 'muted' }, 'Exports evaluated modifiers, applies transforms and converts Z-up to Wii Y-up. Textures are resized to power-of-two dimensions and embedded as RGBA8. Basic unlit color/texture, cutout and alpha blend are supported; PBR lighting and metallic effects are not exported.'));
@@ -9652,7 +9715,7 @@ function buildExport(body) {
   go.addEventListener('click', () => {
     try {
       const base = safeFileName(nameIn.value, 'model');
-      const r = runExport(st.fmt, { selectedOnly: st.selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
+      const r = runExport(st.fmt, { selectedOnly: selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
       shareOrDownload(r.name, r.data);
       const kb = (r.data.length || r.data.byteLength || 0) / 1024;
       $('#exportInfo').textContent = `${r.name} · ${kb > 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(kb)) + ' KB'}${r.count > 1 ? ` · ${r.count} files inside` : ''}`;
