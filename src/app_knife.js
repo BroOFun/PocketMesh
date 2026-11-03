@@ -108,7 +108,7 @@ function drawKnife() {
     const p = knifeScreen(a), q = knifeScreen(b); if (!p.valid || !q.valid) return;
     ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
     ctx.setLineDash(preview ? [5, 4] : []); ctx.lineWidth = 4; ctx.strokeStyle = '#14171c'; ctx.stroke();
-    ctx.lineWidth = 2; ctx.strokeStyle = preview ? '#ffe3a2' : '#ffad48'; ctx.stroke(); ctx.setLineDash([]);
+    ctx.lineWidth = 2; ctx.strokeStyle = preview ? THEME.highlight : THEME.selection; ctx.stroke(); ctx.setLineDash([]);
   };
   for (const key of KNIFE.edges) { const [a, b] = ekeySplit(key); line(KNIFE.mesh.verts[a], KNIFE.mesh.verts[b], false); }
   if (KNIFE.first && KNIFE.hover) line(KNIFE.first.point, KNIFE.hover.point, true);
@@ -116,7 +116,7 @@ function drawKnife() {
     const p = knifeScreen(pick.point); if (!p.valid) continue;
     const vertex = pick.kind === 'Vertex';
     ctx.beginPath(); ctx.arc(p.x, p.y, vertex ? 7 : 5, 0, Math.PI * 2);
-    ctx.fillStyle = '#151a22'; ctx.fill(); ctx.strokeStyle = vertex ? '#84f0b0' : pick.kind === 'Face' ? '#9edbff' : '#ffd180'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#151a22'; ctx.fill(); ctx.strokeStyle = vertex ? '#84f0b0' : pick.kind === 'Face' ? '#9edbff' : THEME.highlight; ctx.lineWidth = 2; ctx.stroke();
     if (vertex) { ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fillStyle = '#84f0b0'; ctx.fill(); }
   }
 }

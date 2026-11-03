@@ -5,31 +5,32 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
 <title>PocketMesh</title>
 <meta name="description" content="Polygon modeler for iPhone: primitives, extrude, inset, loop cut, UV unwrapping, textures, OBJ/FBX/DAE/glTF export.">
-<meta name="theme-color" content="#16181d">
+<meta name="theme-color" content="#101020">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="PocketMesh">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="format-detection" content="telephone=no">
 <link rel="manifest" href="manifest.webmanifest">
-<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
-<link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png?v=cube">
+<link rel="apple-touch-icon" href="icons/apple-touch-icon.png?v=cube">
 <style>
 /* Layout: one-screen modeling app — header + option bar, viewport (3D / UV / split), operator shelf. Single dark look by design. */
 :root {
   color-scheme: dark;
-  --chrome: #16181d;      /* app chrome */
-  --panel: #1e2128;       /* sheets, bars */
-  --panel-2: #272b34;     /* raised controls */
-  --panel-3: #323743;     /* hover / pressed */
-  --line: #393e4b;
+  --chrome: #101020;      /* app chrome */
+  --panel: #1b1b2b;       /* sheets, bars */
+  --panel-2: #252538;     /* raised controls */
+  --panel-3: #313149;     /* hover / pressed */
+  --line: #41415b;
   --fg: #e7e9ef;
   --fg-dim: #9ba2b3;
   --fg-faint: #6a7183;
-  --sel: #ff9d3a;         /* selection orange, the 3D-tool convention */
-  --sel-ink: #1b1206;
-  --on: #5aa7ff;          /* toggled-on state */
-  --on-bg: #24364f;
+  --sel: #9275ff;         /* cube-logo blue-purple */
+  --sel-bright: #c6b6ff;
+  --sel-ink: #100b26;
+  --on: #b5a0ff;          /* toggled-on state */
+  --on-bg: #30264f;
   --danger: #ff6170;
   --ax-x: #f2506b; --ax-y: #86cf38; --ax-z: #4b9df6;
   --view-top: #31353f; --view-bot: #24272e;
@@ -59,6 +60,11 @@ input, select { font: inherit; color: var(--fg); }
 .spacer { flex: 1; }
 .ib { width: 36px; height: 36px; display: inline-grid; place-items: center; border: 0; border-radius: var(--r); background: transparent; cursor: pointer; flex: none; }
 .ib svg { width: 21px; height: 21px; }
+#btnMenu { position: relative; }
+#btnMenu img { display: block; width: 34px; height: 34px; border-radius: 8px; }
+#btnMenu svg { position: absolute; bottom: 0; right: 0; width: 14px; height: 14px; padding: 1px; border-radius: 3px; background: var(--panel); }
+.sheet-head h2 { display: flex; align-items: center; gap: 10px; }
+.brand-logo { width: 40px; height: 40px; border-radius: 9px; flex: none; }
 .ib:active, .chip:active, .pill:active { background: var(--panel-3); }
 .ib:disabled { opacity: .35; }
 .ib.on, .chip.on { background: var(--on-bg); color: var(--on); }
@@ -188,12 +194,12 @@ input[type=color] { width: 100%; height: 34px; border: 1px solid var(--line); bo
 .brres-material { display: grid; gap: 3px; width: 100%; padding: 9px; text-align: left; overflow-wrap: anywhere; background: var(--panel-3); border: 1px solid var(--line); border-radius: 8px; cursor: pointer; }
 .brres-material .muted { font-size: 12px; }
 .slot { display: flex; align-items: center; gap: 10px; padding: 8px; border-radius: 10px; border: 1px solid transparent; cursor: pointer; }
-.slot.on { border-color: var(--sel); background: #ff9d3a14; }
+.slot.on { border-color: var(--sel); background: #9275ff14; }
 .swatch { width: 30px; height: 30px; border-radius: 7px; border: 1px solid #0006; flex: none; background-size: cover; background-position: center; }
 .texprev { width: 100%; aspect-ratio: 1; max-width: 100%; border-radius: 10px; border: 1px solid var(--line); background: #111 center/contain no-repeat; image-rendering: auto; }
 .texprev.px { image-rendering: pixelated; }
 .olrow { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 10px; cursor: pointer; }
-.olrow.sel { background: #ff9d3a1c; } .olrow.act .nm { color: var(--sel); font-weight: 700; }
+.olrow.sel { background: #9275ff1c; } .olrow.act .nm { color: var(--sel); font-weight: 700; }
 .olrow .nm { flex: 1; font-size: 16px; }
 .olrow .meta { font: 11px var(--mono); color: var(--fg-faint); }
 .muted { color: var(--fg-dim); font-size: 13.5px; line-height: 1.4; }

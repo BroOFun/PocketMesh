@@ -85,7 +85,7 @@ function generateTexture(kind, size = 1024) {
       x.fillStyle = (i + j) % 2 ? '#e8eaee' : '#2a2e37';
       x.fillText(String.fromCharCode(65 + i) + (n - j), i * cell + cell / 2, j * cell + cell / 2);
     }
-    x.strokeStyle = '#ff9d3a'; x.lineWidth = Math.max(2, size / 256);
+    x.strokeStyle = THEME.selection; x.lineWidth = Math.max(2, size / 256);
     x.strokeRect(1, 1, size - 2, size - 2);
   }
   const names = { checker: 'Checker', color: 'ColorGrid', uvgrid: 'UVGrid' };

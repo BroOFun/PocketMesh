@@ -12,6 +12,10 @@ import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 const $ = (s, r = document) => r.querySelector(s);
 const clamp = (x, a, b) => Math.max(a, Math.min(b, x));
 const DEG = Math.PI / 180;
+// Canvas and mesh overlays use the same brand colors as the controls.
+const themeStyle = getComputedStyle(document.documentElement);
+const THEME = { selection: themeStyle.getPropertyValue('--sel').trim(), highlight: themeStyle.getPropertyValue('--sel-bright').trim() };
+const themeChannels = hex => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255);
 const fmt = (x, d = 3) => (Math.abs(x) < 1e-9 ? 0 : x).toFixed(d);
 function h(tag, attrs = {}, ...kids) {
   const e = document.createElement(tag);
@@ -75,7 +79,7 @@ const ICONS = {
   cube: '<path d="M12 3 20 7.5v9L12 21l-8-4.5v-9z"/><path d="M4 7.5 12 12l8-4.5M12 12v9"/>',
   extrude: '<path d="M4 16 12 19.5 20 16 12 12.5z" fill="currentColor" fill-opacity=".3"/><path d="M12 15V3.5M8.5 7 12 3.5 15.5 7"/>',
   inset: '<rect x="3.5" y="3.5" width="17" height="17" rx="1"/><rect x="8" y="8" width="8" height="8" fill="currentColor" fill-opacity=".35"/><path d="M3.5 3.5 8 8M20.5 3.5 16 8M3.5 20.5 8 16M20.5 20.5 16 16" stroke-opacity=".6"/>',
-  loopcut: '<rect x="3.5" y="5" width="17" height="14" rx="1"/><path d="M12 5v14" style="stroke:#ffd84d" stroke-width="2.2"/>',
+  loopcut: '<rect x="3.5" y="5" width="17" height="14" rx="1"/><path d="M12 5v14" style="stroke:var(--sel)" stroke-width="2.2"/>',
   subdivide: '<rect x="4" y="4" width="16" height="16" rx="1"/><path d="M12 4v16M4 12h16"/>',
   fill: '<path d="M4 18 12 5l8 13z" fill="currentColor" fill-opacity=".35"/>',
   merge: '<path d="M4.5 4.5 10 10M19.5 4.5 14 10M12 14v6"/><circle cx="12" cy="12" r="2.2" fill="currentColor"/>',
@@ -455,8 +459,8 @@ function updateGeomUVs(o, fromRebuild = false) {
 
 // ---------- overlays ----------
 const COL = {
-  sel: [1, 0.616, 0.227], active: [1, 1, 1], dark: [0.04, 0.045, 0.055], wire: [0.62, 0.65, 0.71], seam: [1, 0.22, 0.25],
-  objSel: [0.93, 0.5, 0.12], objAct: [1, 0.72, 0.33], fdot: [0.06, 0.06, 0.07],
+  sel: themeChannels(THEME.selection), active: [1, 1, 1], dark: [0.04, 0.045, 0.055], wire: [0.62, 0.65, 0.71], seam: [1, 0.22, 0.25],
+  objSel: themeChannels(THEME.selection), objAct: themeChannels(THEME.highlight), fdot: [0.06, 0.06, 0.07],
   crease: [0.92, 0.22, 0.85],
 };
 function setLineGeo(o, key, positions, colors, mat) {
@@ -553,7 +557,7 @@ function refreshOverlays(o) {
       for (const t of triangulateFace(m, f)) for (const c of t) tris.push(...P[f.v[c]]);
     }
     if (!o.fselOv) {
-      o.fselOv = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: 0xff9d3a, transparent: true, opacity: 0.26, side: THREE.DoubleSide, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
+      o.fselOv = new THREE.Mesh(new THREE.BufferGeometry(), new THREE.MeshBasicMaterial({ color: THEME.selection, transparent: true, opacity: 0.26, side: THREE.DoubleSide, depthWrite: false, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 }));
       o.fselOv.renderOrder = 1;
       o.node.add(o.fselOv);
     }

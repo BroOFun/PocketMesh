@@ -1,5 +1,7 @@
 # PocketMesh
 
+<img src="assets/icons/icon-192.png" alt="PocketMesh blue-purple cube logo" width="96" height="96">
+
 A polygon modeler for iPhone, built around the way Blender works: Object and Edit Mode, vertex / edge / face selection, extrude, inset, loop cut, Blender-style Move / Rotate / Scale with axis locks and typed values, UV unwrapping, image textures, and export to BRRES, OBJ, FBX, DAE and glTF.
 
 It installs to your Home Screen and runs as a full-screen app. It works offline and keeps your scene on the phone.
@@ -100,7 +102,7 @@ UVs unchanged. Plain **Straighten** follows the direction between the endpoints.
 
 In **Edit Mode**, choose **Knife** in the left sidebar (keyboard: **K**). Tap a
 face, vertex or edge to start, then another point to preview a cut across the
-visible faces. Face interiors show a blue ring; edge snaps show amber. Nearby vertices magnetize automatically and show a green ring.
+visible faces. Face interiors show a blue ring; edge snaps show lavender. Nearby vertices magnetize automatically and show a green ring.
 Keep tapping to continue, or choose **New cut** for a separate stroke. **Apply**
 (Enter) commits the cuts as one undoable operation; **Cancel** (Escape) discards
 them. **Undo cut** (Backspace) removes the last preview segment. Drag to orbit or
