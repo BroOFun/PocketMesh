@@ -228,11 +228,11 @@ function updateGuide(t) {
   guideLine.geometry.dispose();
   guideLine.geometry = new LineSegmentsGeometry();
   guideLine.geometry.setPositions([a.x, a.y, a.z, b.x, b.y, b.z]);
-  const col = t.axis === null ? 0xffb35c : GUIDE_COLORS[t.axis];
-  guideMat.color.setHex(col);
+  const col = t.axis === null ? THEME.highlight : GUIDE_COLORS[t.axis];
+  guideMat.color.set(col);
   guideArrow.visible = t.kind === 'move';
   if (t.kind === 'move' && t.customAxis && t.axis === null) {
-    const msg = t.facing ? 'This side faces you: slide up to pull it toward you, down to push it in' : 'Drag along the orange arrow to pull out, the other way to push in';
+    const msg = t.facing ? 'This side faces you: slide up to pull it toward you, down to push it in' : 'Drag along the purple arrow to pull out, the other way to push in';
     if ($('#hint').textContent !== msg) hint(msg);
   }
   if (guideArrow.visible) {
@@ -482,7 +482,7 @@ function tfShowBar(refreshOnly) {
   bar.hidden = false;
   $('#shelf').hidden = true;
   if (!refreshOnly) hint(t.customAxis && t.kind === 'move'
-    ? 'Drag along the orange arrow to pull out, the other way to push in'
+    ? 'Drag along the purple arrow to pull out, the other way to push in'
     : 'Drag anywhere to ' + t.label.toLowerCase() + ' · two fingers still orbit/zoom');
   else hint(null);
 }

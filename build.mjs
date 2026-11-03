@@ -41,11 +41,11 @@ for (const f of fs.readdirSync(path.join(root, 'assets/icons'))) fs.copyFileSync
 const manifest = {
   name: 'PocketMesh', short_name: 'PocketMesh', description: 'Polygon modeling, UVs and textures on your phone.',
   start_url: './', scope: './', display: 'standalone', orientation: 'any',
-  background_color: '#16181d', theme_color: '#16181d', categories: ['graphics', 'design', 'productivity'],
+  background_color: '#101020', theme_color: '#101020', categories: ['graphics', 'design', 'productivity'],
   icons: [
-    { src: 'icons/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
-    { src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-    { src: 'icons/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+    { src: 'icons/icon-192.png?v=cube', sizes: '192x192', type: 'image/png', purpose: 'any' },
+    { src: 'icons/icon-512.png?v=cube', sizes: '512x512', type: 'image/png', purpose: 'any' },
+    { src: 'icons/icon-maskable-512.png?v=cube', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
   ],
 };
 fs.writeFileSync(path.join(dist, 'manifest.webmanifest'), JSON.stringify(manifest, null, 2));

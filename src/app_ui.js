@@ -14,6 +14,7 @@ CAM.viewName = null;
 const SHEET = { refresh: null, kind: null };
 function openSheet(title, build, { panel = false, kind = null } = {}) {
   $('#sheetTitle').textContent = title;
+  if (title.includes('PocketMesh')) $('#sheetTitle').prepend(h('img', {class: 'brand-logo', src: 'icons/icon-192.png?v=cube', alt: '', width: 40, height: 40}));
   const body = $('#sheetBody');
   body.innerHTML = '';
   build(body);
@@ -108,7 +109,9 @@ function segButtons(value, options, onChange) {
 }
 
 // ---------- header ----------
-$('#btnMenu').innerHTML = icon('menu');
+$('#btnMenu').replaceChildren(h('img', {src: 'icons/icon-192.png?v=cube', alt: '', width: 34, height: 34}));
+$('#btnMenu').insertAdjacentHTML('beforeend', icon('menu'));
+$('#btnMenu').title = 'PocketMesh · File menu';
 $('#btnUndo').innerHTML = icon('undo');
 $('#btnRedo').innerHTML = icon('redo');
 $('#btnUndo').addEventListener('click', () => { if (knifeActive()) knifeUndo(); else if (TF.active) tfCancel(); else if (PM.active) pmCancel(); else undo(); });

@@ -72,7 +72,7 @@ function drawRuler() {
   };
   const line = (a,b,preview = false) => {
     const p = screen(a), q = screen(b); if (!p || !q) return;
-    const color = preview ? '#8be4fa' : '#ffd27b';
+    const color = preview ? '#8be4fa' : THEME.highlight;
     ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(q.x,q.y); ctx.strokeStyle = '#10151c'; ctx.lineWidth = 4; ctx.stroke();
     ctx.strokeStyle = color; ctx.lineWidth = 2; ctx.setLineDash(preview ? [5,4] : []); ctx.stroke(); ctx.setLineDash([]);
     dot(p,color); dot(q,color); label(formatMeasurement(measurementMeters(a,b,S.ruler.metersPerUnit),S.ruler.unit),(p.x+q.x)/2,(p.y+q.y)/2,color);
