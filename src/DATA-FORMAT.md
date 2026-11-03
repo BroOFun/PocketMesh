@@ -51,11 +51,16 @@ scene = {
     alpha: 1,
     roughness: 0.5,
     metalness: 0,
+    alphaMode: 'auto',               // auto / opaque / cutout / blend (BRRES)
+    alphaCutoff: 0.5,
+    doubleSided: true,
+    wrap: 'repeat',                  // repeat / extend (BRRES)
     texture: null | {
       name: 'Bricks.png',             // unique file name within the export
       mime: 'image/png' | 'image/jpeg',
       bytes: Uint8Array,
       width: 1024, height: 1024,
+      rgba: Uint8Array,              // BRRES only: decoded top-left-origin RGBA pixels
       filter: 'linear' | 'nearest'    // nearest = pixel-art look
     }
   }]
@@ -64,3 +69,13 @@ scene = {
 
 A face whose `mat` slot is out of range of `object.materials` uses slot 0 (or the
 default material if the object has none).
+
+## Modifier state
+
+Editor objects and saved projects may include
+`modifiers: [{type: 'subdivision', method: 'catmull-clark' | 'simple', levels: 0..3, enabled: true}]`.
+Missing modifiers mean an empty stack. The current UI supports one subdivision
+modifier per object. `mesh` always remains the editable control mesh until Apply;
+`renderMesh` is transient evaluated geometry, never serialized. The app evaluates
+modifiers before constructing an export scene. UVs use face-varying bilinear
+interpolation so island seams are not welded. See `TRACK-AUTHORING.md` for limits.

@@ -261,7 +261,8 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   </div>
   <input type="file" id="fileTex" accept="image/*" hidden>
   <input type="file" id="fileProj" accept=".json,application/json" hidden>
-  <input type="file" id="fileObj" hidden>
+  <input type="file" id="fileObj" multiple hidden>
+  <input type="file" id="fileMat" multiple hidden>
 </div>
 
 <script type="importmap">{"imports":{"three":"./vendor/three.module.min.js","three/addons/":"./vendor/addons/"}}</script>
@@ -1779,6 +1780,105 @@ function extractFaces(m, fset) {
 function looseParts(m) {
   const all = new Set(); for (let i = 0; i < m.verts.length; i++) all.add(i);
   return vertIslands(m, all);
+}
+
+// ==== modifiers.js ====
+// Non-destructive subdivision. Geometry is shared across edges; UVs stay
+// face-varying so seams and material boundaries survive evaluation.
+function normalizeModifiers(modifiers = []) {
+  return (Array.isArray(modifiers) ? modifiers : []).filter((m) => m && m.type === 'subdivision').slice(0, 1).map((m) => ({
+    type: 'subdivision', enabled: m.enabled !== false,
+    levels: Math.max(0, Math.min(3, Math.round(Number(m.levels) || 0))),
+    method: m.method === 'simple' ? 'simple' : 'catmull-clark',
+  }));
+}
+
+function subdivisionSurface(mesh, levels = 1, method = 'catmull-clark') {
+  if (!Number.isInteger(levels) || levels < 0 || levels > 3) throw new Error('Subdivision supports levels 0–3');
+  let m = mesh;
+  for (let level = 0; level < levels; level++) {
+    const count = m.faces.reduce((n, f) => n + f.v.length, 0);
+    if (count > 100000) throw new Error('Subdivision would exceed 100,000 faces. Lower the level or simplify the mesh.');
+    const t = topo(m), fp = m.faces.map((f) => faceCenter(m, f));
+    const mid = t.edges.map(([a, b]) => vlerp(m.verts[a], m.verts[b], 0.5));
+    const simple = method === 'simple';
+    const verts = m.verts.map((p, vi) => {
+      if (simple || !t.vertFaces[vi].length) return p.slice();
+      const es = t.vertEdges[vi], fs = t.vertFaces[vi];
+      // Keep non-manifold junctions fixed; open boundaries use the cubic rule.
+      if (es.some((ei) => t.edgeFaces[ei].length > 2 || !t.edgeFaces[ei].length)) return p.slice();
+      const boundary = es.filter((ei) => t.edgeFaces[ei].length === 1);
+      if (boundary.length === 2) {
+        const ns = boundary.map((ei) => m.verts[t.edges[ei].find((v) => v !== vi)]);
+        return vadd(vscale(p, 0.75), vscale(vadd(ns[0], ns[1]), 0.125));
+      }
+      if (boundary.length || fs.length !== es.length) return p.slice();
+      const n = fs.length;
+      const f = vscale(fs.reduce((a, fi) => vadd(a, fp[fi]), [0, 0, 0]), 1 / n);
+      const r = vscale(es.reduce((a, ei) => vadd(a, mid[ei]), [0, 0, 0]), 1 / n);
+      return vscale(vadd(vadd(f, vscale(r, 2)), vscale(p, n - 3)), 1 / n);
+    });
+    const edgeBase = verts.length;
+    t.edges.forEach((_, ei) => {
+      const fs = t.edgeFaces[ei];
+      verts.push(!simple && fs.length === 2 ? vscale(vadd(vscale(mid[ei], 2), vadd(fp[fs[0]], fp[fs[1]])), 0.25) : mid[ei]);
+    });
+    const faceBase = verts.length;
+    verts.push(...fp);
+    const faces = [];
+    m.faces.forEach((f, fi) => {
+      const n = f.v.length, uv = f.v.map((_, i) => f.uv[i] || [0, 0]);
+      const center = uv.reduce((a, u) => [a[0] + u[0] / n, a[1] + u[1] / n], [0, 0]);
+      for (let i = 0; i < n; i++) {
+        const prev = (i + n - 1) % n, next = (i + 1) % n;
+        faces.push({ v: [f.v[i], edgeBase + t.edgeIndex.get(ekey(f.v[i], f.v[next])), faceBase + fi, edgeBase + t.edgeIndex.get(ekey(f.v[prev], f.v[i]))],
+          uv: [uv[i].slice(), uvlerp(uv[i], uv[next], 0.5), center.slice(), uvlerp(uv[prev], uv[i], 0.5)], mat: f.mat });
+      }
+    });
+    const seams = new Set(), looseEdges = [];
+    t.edges.forEach(([a, b], ei) => {
+      const v = edgeBase + ei;
+      if (m.seams.has(ekey(a, b))) { seams.add(ekey(a, v)); seams.add(ekey(v, b)); }
+      if (!t.edgeFaces[ei].length) looseEdges.push([a, v], [v, b]);
+    });
+    m = { verts, faces, looseEdges, seams, smooth: simple ? m.smooth : true };
+  }
+  return m;
+}
+
+function evaluateModifiers(mesh, modifiers) {
+  let result = mesh;
+  for (const m of normalizeModifiers(modifiers)) if (m.enabled) result = subdivisionSurface(result, m.levels, m.method);
+  return result;
+}
+
+// ==== materials.js ====
+// Basic Wavefront material import; image files are selected alongside the MTL.
+function importMTL(text) {
+  const materials = [], warnings = [];
+  let m = null;
+  for (const line of text.split(/\r?\n/)) {
+    const parts = line.replace(/\s*#.*$/, '').trim().split(/\s+/), key = parts.shift();
+    if (key === 'newmtl') {
+      m = { name: parts.join(' '), color: [0.8, 0.8, 0.8], alpha: 1, roughness: 0.5, image: null };
+      if (!m.name) throw new Error('MTL material is missing its name');
+      materials.push(m);
+    } else if (m && key === 'Kd') {
+      if (parts.length < 3 || parts.slice(0, 3).some((v) => !Number.isFinite(+v))) throw new Error('Invalid MTL diffuse color');
+      m.color = parts.slice(0, 3).map((v) => Math.max(0, Math.min(1, +v)));
+    } else if (m && (key === 'd' || key === 'Tr')) {
+      const v = Number(parts[0]);
+      if (!Number.isFinite(v)) throw new Error('Invalid MTL opacity');
+      m.alpha = Math.max(0, Math.min(1, key === 'Tr' ? 1 - v : v));
+    } else if (m && key === 'Ns') {
+      const v = Number(parts[0]);
+      if (Number.isFinite(v)) m.roughness = Math.sqrt(2 / (Math.max(0, v) + 2));
+    } else if (m && key === 'map_Kd') {
+      if (parts[0]?.startsWith('-')) warnings.push(m.name + ': texture map options are not supported; assign the image in Material.');
+      else m.image = parts.join(' ').replace(/^"|"$/g, '');
+    } else if (m && /^(map_|bump|disp)/i.test(key)) warnings.push(m.name + ': ' + key + ' is not supported.');
+  }
+  return { materials, warnings };
 }
 
 // ==== uv.js ====
@@ -3758,7 +3858,7 @@ function _exNormTexture(t) {
   const name = _exCleanName(t.name, 'texture.png');
   let mime = t.mime;
   if (mime !== 'image/png' && mime !== 'image/jpeg') mime = /\.jpe?g$/i.test(name) ? 'image/jpeg' : 'image/png';
-  return { name, mime, bytes, filter: t.filter === 'nearest' ? 'nearest' : 'linear', width: t.width | 0, height: t.height | 0 };
+  return { name, mime, bytes, rgba: t.rgba, filter: t.filter === 'nearest' ? 'nearest' : 'linear', width: t.width | 0, height: t.height | 0 };
 }
 
 // Id of a value in `list`, deduplicated with nested numeric Maps (no float->string keys).
@@ -3808,6 +3908,8 @@ function _exPrepare(scene, o) {
       roughness: s && s.roughness != null ? _exClamp01(s.roughness) : 0.5,
       metalness: s && s.metalness != null ? _exClamp01(s.metalness) : 0,
       texture: tex,
+      alphaMode: s?.alphaMode || 'auto', alphaCutoff: s?.alphaCutoff == null ? 0.5 : _exClamp01(s.alphaCutoff), doubleSided: s?.doubleSided !== false, wrap: s?.wrap || 'repeat',
+      filter: s?.texture?.filter === 'nearest' ? 'nearest' : 'linear',
       index: materials.length,
     };
     materials.push(m);
@@ -5044,6 +5146,291 @@ function makeZip(files) {
   return out;
 }
 
+// ==== brres.js ====
+// Static NW4R BRRES export: MDL0 v11 + tiled RGBA8 TEX0 v3.
+// Original implementation; format references and limits: TRACK-AUTHORING.md.
+// Uses export.js's geometry preparation (triangulation, transforms, normals).
+class _BrWriter {
+  constructor() { this.bytes = new Uint8Array(65536); this.view = new DataView(this.bytes.buffer); this.length = 0; this.strings = []; }
+  alloc(size, align = 4) {
+    const at = Math.ceil(this.length / align) * align, end = at + size;
+    if (end > 64 * 1024 * 1024) throw new Error('BRRES exceeds 64 MB. Reduce geometry or texture sizes.');
+    if (end > this.bytes.length) { const b = new Uint8Array(Math.max(end, this.bytes.length * 2)); b.set(this.bytes); this.bytes = b; this.view = new DataView(b.buffer); }
+    this.length = end; return at;
+  }
+  u8(at, n) { this.view.setUint8(at, n); }
+  u16(at, n) { this.view.setUint16(at, n); }
+  u32(at, n) { this.view.setUint32(at, n >>> 0); }
+  f32(at, n) { if (!Number.isFinite(n) || Math.abs(n) > 3.4e38) throw new Error('Non-finite geometry in BRRES export'); this.view.setFloat32(at, n); }
+  text(at, s) { this.bytes.set(new TextEncoder().encode(s), at); }
+  str(at, base, value) { this.strings.push({ at, base, value }); }
+  bp(at, reg, value) { this.u8(at, 0x61); this.u32(at + 1, (reg << 24) | (value & 0xffffff)); return at + 5; }
+  cp(at, reg, value) { this.u8(at, 0x08); this.u8(at + 1, reg); this.u32(at + 2, value); return at + 6; }
+  xf(at, reg, value) { this.u8(at, 0x10); this.u16(at + 1, 0); this.u16(at + 3, reg); this.u32(at + 5, value); return at + 9; }
+  finish() {
+    const names = new Map();
+    for (const { at, base, value } of this.strings) {
+      if (!names.has(value)) { const data = new TextEncoder().encode(value), p = this.alloc(4 + data.length + 1); this.u32(p, data.length); this.bytes.set(data, p + 4); names.set(value, p + 4); }
+      this.u32(at, names.get(value) - base);
+    }
+    this.alloc(0, 128); this.u32(8, this.length);
+    return this.bytes.slice(0, this.length);
+  }
+}
+
+// NW4R resource dictionaries use a Patricia tree, with descending bit indices.
+// The serialized entry order is also the model resource index order.
+function _brDictionary(w, entries) {
+  if (!entries.length) return 0;
+  const at = w.alloc(24 + 16 * entries.length);
+  const nodes = [{ name: '', bit: 65535, left: 0, right: 0 }];
+  const bitAt = (name, bit) => ((name.charCodeAt(bit >>> 3) || 0) >>> (bit & 7)) & 1;
+  for (const entry of entries) {
+    const i = nodes.length, name = entry.name;
+    let leaf = nodes[0].left, parent = 0;
+    while (nodes[parent].bit > nodes[leaf].bit) { parent = leaf; leaf = bitAt(name, nodes[leaf].bit) ? nodes[leaf].right : nodes[leaf].left; }
+    const other = nodes[leaf].name;
+    let bit = -1;
+    for (let b = Math.max(name.length, other.length) * 8 - 1; b >= 0; b--) if (bitAt(name, b) !== bitAt(other, b)) { bit = b; break; }
+    if (bit < 0) throw new Error('Duplicate BRRES resource name: ' + name);
+    parent = 0; let child = nodes[0].left;
+    while (nodes[parent].bit > nodes[child].bit && nodes[child].bit > bit) { parent = child; child = bitAt(name, nodes[child].bit) ? nodes[child].right : nodes[child].left; }
+    const one = bitAt(name, bit);
+    nodes.push({ name, bit, left: one ? child : i, right: one ? i : child });
+    if (parent !== 0 && bitAt(name, nodes[parent].bit)) nodes[parent].right = i; else nodes[parent].left = i;
+  }
+  w.u32(at, 24 + 16 * entries.length); w.u32(at + 4, entries.length);
+  nodes.forEach((n, i) => {
+    const p = at + 8 + i * 16;
+    w.u16(p, n.bit); w.u16(p + 4, n.left); w.u16(p + 6, n.right);
+    if (i) { w.str(p + 8, at, n.name); entries[i - 1].patch = (target) => w.u32(p + 12, target - at); }
+  });
+  return at;
+}
+function _brNames() {
+  const seen = new Set();
+  return (name) => { const base = String(name || 'resource').replace(/[^A-Za-z0-9_.-]/g, '_').slice(0, 64) || 'resource'; let n = base, i = 1; while (seen.has(n)) n = base + '_' + i++; seen.add(n); return n; };
+}
+function _brBounds(points) {
+  const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity];
+  for (const p of points) for (let a = 0; a < 3; a++) { lo[a] = Math.min(lo[a], p[a]); hi[a] = Math.max(hi[a], p[a]); }
+  return [lo, hi];
+}
+function _brWriteBounds(w, at, bounds) { bounds.flat().forEach((v, i) => w.f32(at + 4 * i, v)); }
+function _brSRGB(v) { return Math.round(255 * Math.max(0, Math.min(1, v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055))); }
+
+function encodeWiiRGBA8(rgba, width, height) {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width < 1 || height < 1 || width > 1024 || height > 1024 || (width & (width - 1)) || (height & (height - 1))) throw new Error('BRRES textures must have power-of-two dimensions up to 1024');
+  if (!rgba || rgba.length !== width * height * 4) throw new Error('BRRES needs decoded RGBA texture pixels');
+  const data = new Uint8Array(Math.ceil(width / 4) * Math.ceil(height / 4) * 64);
+  let block = 0;
+  for (let by = 0; by < height; by += 4) for (let bx = 0; bx < width; bx += 4) {
+    for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+      const src = (Math.min(by + y, height - 1) * width + Math.min(bx + x, width - 1)) * 4, i = (y * 4 + x) * 2;
+      data[block + i] = rgba[src + 3]; data[block + i + 1] = rgba[src];
+      data[block + 32 + i] = rgba[src + 1]; data[block + 33 + i] = rgba[src + 2];
+    }
+    block += 64;
+  }
+  return data;
+}
+
+function _brShader(w, mdl, index, textured) {
+  const at = w.alloc(512, 32);
+  w.u32(at, 512); w.u32(at + 4, mdl - at); w.u32(at + 8, index); w.u8(at + 12, 1);
+  for (let i = 0; i < 8; i++) w.u8(at + 16 + i, textured && i === 0 ? 0 : 255);
+  let p = at + 32;
+  // Identity swizzle tables. KSEL shares registers with the swizzle bits.
+  for (let i = 0; i < 8; i++) { p = w.bp(p, 0xfe, 15); p = w.bp(p, 0xf6 + i, i % 2 ? 14 : 4); }
+  w.bp(p, 0x27, 0xffffff);
+  p = at + 0x80;
+  p = w.bp(p, 0xfe, 0xfffff0); p = w.bp(p, 0xf6, 0);
+  p = w.bp(p, 0x28, (textured ? 0x40 : 0) | (7 << 15) | (7 << 19));
+  // color = texture * raster color, or raster color alone.
+  p = w.bp(p, 0xc0, (1 << 19) | (15 << 12) | ((textured ? 8 : 15) << 8) | ((textured ? 10 : 15) << 4) | (textured ? 15 : 10));
+  p += 5;
+  p = w.bp(p, 0xc1, (1 << 19) | (7 << 13) | ((textured ? 4 : 7) << 10) | ((textured ? 5 : 7) << 7) | ((textured ? 7 : 5) << 4));
+  p += 5; w.bp(p, 0x10, 0);
+  return at;
+}
+function _brMaterial(w, mdl, m, index, name, texName) {
+  const at = w.alloc(0x418 + (texName ? 0x34 : 0));
+  w.u32(at + 4, mdl - at); w.str(at + 8, at, name); w.u32(at + 12, index);
+  const blend = m.alphaMode === 'blend' || ((!m.alphaMode || m.alphaMode === 'auto') && m.alpha < 1);
+  const cutout = m.alphaMode === 'cutout';
+  w.u32(at + 16, blend ? 0x80000000 : 0);
+  w.u8(at + 20, texName ? 1 : 0); w.u8(at + 21, 1); w.u8(at + 22, 1);
+  w.u32(at + 24, m.doubleSided === false ? 2 : 0);
+  w.u8(at + 28, cutout ? 0 : 1); w.u8(at + 29, 255); w.u8(at + 30, 255);
+  w.u32(at + 0x2c, texName ? 1 : 0); w.u32(at + 0x30, texName ? 0x418 : 0);
+  w.u32(at + 0x1a8, 0xffffffff); // identity SRT for all eight texture matrices
+  for (let i = 0; i < 8; i++) {
+    const p = at + 0x250 + i * 0x34;
+    w.u8(p, 255); w.u8(p + 1, 255); w.u8(p + 3, 1);
+    for (let a = 0; a < 3; a++) w.f32(p + 4 + a * 20, 1);
+  }
+  // Unlit material register color, including tint and opacity. PBR is not a GX shader.
+  w.u32(at + 0x3f0, 63);
+  m.color.forEach((c, i) => w.u8(at + 0x3f4 + i, _brSRGB(c)));
+  w.u8(at + 0x3f7, m.alphaMode === 'opaque' ? 255 : Math.round(m.alpha * 255));
+  w.u32(at + 0x3f8, 0xffffffff);
+  let sampler = 0;
+  if (texName) {
+    sampler = at + 0x418;
+    w.str(sampler, sampler, texName);
+    w.u32(sampler + 0x18, m.wrap === 'extend' ? 0 : 1); w.u32(sampler + 0x1c, m.wrap === 'extend' ? 0 : 1);
+    const f = m.filter === 'nearest' ? 0 : 1;
+    w.u32(sampler + 0x20, f); w.u32(sampler + 0x24, f);
+  }
+  const dl = w.alloc(0x180, 32);
+  w.u32(at + 0x3c, dl - at);
+  let p = dl;
+  p = w.bp(p, 0xf3, ((cutout ? 6 : 7) << 16) | (7 << 19) | (cutout ? Math.round((m.alphaCutoff ?? 0.5) * 255) : 0));
+  p = w.bp(p, 0x40, 1 | (3 << 1) | (blend ? 0 : 16));
+  p = w.bp(p, 0xfe, 0xffe3);
+  p = w.bp(p, 0x41, blend ? 1 | (4 << 8) | (5 << 5) : 0);
+  w.bp(p, 0x42, 0);
+  // Explicit color register initialization avoids dependence on a previous material.
+  p = dl + 0x20;
+  for (let i = 1; i < 4; i++) { p = w.bp(p, 0xe0 + i * 2, 0xff0ff); for (let j = 0; j < 3; j++) p = w.bp(p, 0xe1 + i * 2, 0xff0ff); }
+  p = dl + 0x60;
+  for (let i = 0; i < 4; i++) { p = w.bp(p, 0xe0 + i * 2, 0x8ff0ff); p = w.bp(p, 0xe1 + i * 2, 0x8ff0ff); }
+  w.bp(dl + 0xa0, 0x25, 0); w.bp(dl + 0xa5, 0x26, 0);
+  if (texName) { w.xf(dl + 0xe0, 0x1040, 5 << 7); w.xf(dl + 0xe9, 0x1050, 61); }
+  w.u32(at, w.length - at);
+  return { at, sampler, blend };
+}
+function _brBuffer(w, mdl, index, name, values, dimension, kind) {
+  const at = w.alloc(kind === 'position' ? 0x40 : kind === 'uv' ? 0x40 : 0x20, 32);
+  const data = w.alloc(values.length * dimension * 4, 32);
+  w.u32(at + 4, mdl - at); w.u32(at + 8, data - at); w.str(at + 12, at, name);
+  w.u32(at + 16, index); w.u32(at + 20, kind === 'normal' ? 0 : 1); w.u32(at + 24, 4);
+  w.u8(at + 29, dimension * 4); w.u16(at + 30, values.length);
+  if (kind === 'position') _brWriteBounds(w, at + 32, _brBounds(values));
+  if (kind === 'uv') for (let a = 0; a < 2; a++) {
+    let lo = Infinity, hi = -Infinity;
+    for (const v of values) { lo = Math.min(lo, v[a]); hi = Math.max(hi, v[a]); }
+    w.f32(at + 32 + a * 4, lo); w.f32(at + 40 + a * 4, hi);
+  }
+  let p = data; for (const v of values) for (const n of v) { w.f32(p, n); p += 4; }
+  w.alloc(0, 32); w.u32(at, w.length - at);
+  return at;
+}
+function _brShape(w, mdl, index, name, count) {
+  const at = w.alloc(0x70, 32);
+  w.u32(at + 4, mdl - at); // matrix 0 (single rigid root bone)
+  const vcdLo = (3 << 9) | (3 << 11), vcdHi = 3, xfSpec = (1 << 2) | (1 << 4);
+  w.u32(at + 0xc, vcdLo); w.u32(at + 0x10, vcdHi); w.u32(at + 0x14, xfSpec);
+  w.u32(at + 0x30, (1 << 9) | (1 << 10) | (1 << 13));
+  w.str(at + 0x38, at, name); w.u32(at + 0x3c, index);
+  w.u32(at + 0x40, count); w.u32(at + 0x44, count / 3);
+  for (let i = 0x48; i <= 0x62; i += 2) w.u16(at + i, 65535);
+  w.u16(at + 0x48, index); w.u16(at + 0x4a, index); w.u16(at + 0x50, index);
+  w.u32(at + 0x64, 0x68); // empty used-matrix table for a single-bound shape
+  const setup = w.alloc(0xe0, 32);
+  w.u32(at + 0x18, 0xe0); w.u32(at + 0x1c, 0xe0); w.u32(at + 0x20, setup - at - 0x18);
+  let p = setup + 10;
+  p = w.cp(p, 0x50, vcdLo); p = w.cp(p, 0x60, vcdHi); p = w.xf(p, 0x1008, xfSpec); p++;
+  p = w.cp(p, 0x70, 1 | (4 << 1) | (4 << 10) | (1 << 21) | (4 << 22) | (1 << 30));
+  p = w.cp(p, 0x80, 0); w.cp(p, 0x90, 0);
+  const primitive = w.alloc(3 + count * 6, 32);
+  w.u8(primitive, 0x90); w.u16(primitive + 1, count);
+  p = primitive + 3;
+  for (let i = 0; i < count; i++) for (let a = 0; a < 3; a++) { w.u16(p, i); p += 2; }
+  w.alloc(0, 32);
+  w.u32(at + 0x24, w.length - primitive); w.u32(at + 0x28, w.length - primitive); w.u32(at + 0x2c, primitive - at - 0x24);
+  w.u32(at, w.length - at);
+  return at;
+}
+
+function exportBRRES(scene, opts = {}) {
+  const scale = opts.scale === undefined ? 1 : Number(opts.scale);
+  if (!Number.isFinite(scale) || scale <= 0 || scale > 100000) throw new Error('BRRES scale must be greater than zero and at most 100000');
+  const prep = _exPrepare(scene, { yUp: true, bake: true });
+  const chunks = [], unique = _brNames();
+  let triangles = 0;
+  for (const ob of prep.objects) {
+    const groups = new Map();
+    for (const face of ob.faces) {
+      for (const tri of _exFaceTris(face)) {
+        if (++triangles > 100000) throw new Error('BRRES export is limited to 100,000 triangles. Simplify the model or reduce subdivision.');
+        let c = groups.get(face.mat);
+        if (!c || c.pos.length + 3 > 60000) { c = { name: unique(ob.name), mat: face.mat, pos: [], normal: [], uv: [] }; groups.set(face.mat, c); chunks.push(c); }
+        for (const corner of tri) {
+          c.pos.push(face.pts[corner].map((v) => v * scale)); c.normal.push(face.n[corner]);
+          c.uv.push([face.uv[corner][0], 1 - face.uv[corner][1]]);
+        }
+      }
+    }
+  }
+  if (!triangles) throw new Error('BRRES needs at least one face; loose edges and points are not exported');
+  if (prep.materials.length > 1024) throw new Error('BRRES supports at most 1024 materials in this exporter');
+  const texNames = _brNames(), matNames = _brNames();
+  const textures = prep.textures.map((t) => ({ ...t, name: texNames(t.name.replace(/\.[^.]+$/, '')), originalName: t.name }));
+  const materialNames = prep.materials.map((m) => matNames(m.name));
+  const w = new _BrWriter(); w.alloc(16); w.text(0, 'bres'); w.u16(4, 0xfeff); w.u16(12, 16); w.u16(14, 2 + textures.length);
+  const root = w.alloc(8); w.text(root, 'root');
+  const categories = [{ name: '3DModels(NW4R)' }]; if (textures.length) categories.push({ name: 'Textures(NW4R)' });
+  _brDictionary(w, categories);
+  const models = [{ name: 'course' }]; categories[0].patch(_brDictionary(w, models));
+  const texEntries = textures.map((t) => ({ name: t.name }));
+  if (textures.length) categories[1].patch(_brDictionary(w, texEntries));
+  w.u32(root + 4, w.length - root);
+  const mdl = w.alloc(0x94, 32); models[0].patch(mdl);
+  w.text(mdl, 'MDL0'); w.u32(mdl + 8, 11); w.u32(mdl + 12, -mdl); w.str(mdl + 0x48, mdl, 'course');
+  const info = mdl + 0x4c;
+  w.u32(info, 0x40); w.u32(info + 4, mdl - info); w.u32(info + 0x10, triangles * 3); w.u32(info + 0x14, triangles); w.u32(info + 0x1c, 1);
+  w.u8(info + 0x22, 1); w.u32(info + 0x24, 0x40); w.u32(info + 0x40, 1);
+  const bounds = _brBounds(chunks.flatMap((c) => c.pos)); _brWriteBounds(w, info + 0x28, bounds);
+  const dict = (slot, entries) => { const p = _brDictionary(w, entries); if (p) w.u32(mdl + 0x10 + slot * 4, p - mdl); };
+  const methods = ['NodeTree', 'DrawOpa', 'DrawXlu'].map((name) => ({ name })); dict(0, methods);
+  const bones = [{ name: 'course' }]; dict(1, bones);
+  const posEntries = chunks.map((c) => ({ name: c.name + '_positions' })); dict(2, posEntries);
+  const nrmEntries = chunks.map((c) => ({ name: c.name + '_normals' })); dict(3, nrmEntries);
+  const uvEntries = chunks.map((c) => ({ name: c.name + '_uv' })); dict(5, uvEntries);
+  const mats = materialNames.map((name) => ({ name })); dict(8, mats);
+  const shaders = materialNames.map((name) => ({ name })); dict(9, shaders);
+  const shapes = chunks.map((c) => ({ name: c.name })); dict(10, shapes);
+  const links = textures.map((t) => ({ name: t.name })); dict(11, links);
+  let p = w.alloc(6); methods[0].patch(p); w.u8(p, 2); w.u8(p + 5, 1);
+  const bone = w.alloc(0xd0); bones[0].patch(bone);
+  w.u32(bone, 0xd0); w.u32(bone + 4, mdl - bone); w.str(bone + 8, bone, 'course'); w.u32(bone + 0x14, 0x11f);
+  for (let a = 0; a < 3; a++) { w.f32(bone + 0x20 + a * 4, 1); w.f32(bone + 0x70 + a * 20, 1); w.f32(bone + 0xa0 + a * 20, 1); }
+  _brWriteBounds(w, bone + 0x44, bounds);
+  const materialData = prep.materials.map((m, i) => {
+    const tex = m.texture ? textures.find((t) => t.originalName === m.texture.name) : null;
+    const result = _brMaterial(w, mdl, m, i, materialNames[i], tex?.name);
+    mats[i].patch(result.at); return { ...result, tex };
+  });
+  materialData.forEach((m, i) => { const sh = _brShader(w, mdl, i, !!m.tex); shaders[i].patch(sh); w.u32(m.at + 0x28, sh - m.at); });
+  for (let i = 0; i < textures.length; i++) {
+    const references = materialData.filter((m) => m.tex === textures[i]);
+    const at = w.alloc(4 + references.length * 8); links[i].patch(at); w.u32(at, references.length);
+    references.forEach((m, j) => { w.u32(at + 4 + j * 8, m.at - at); w.u32(at + 8 + j * 8, m.sampler - at); });
+  }
+  for (let i = 0; i < chunks.length; i++) {
+    const c = chunks[i]; shapes[i].patch(_brShape(w, mdl, i, c.name, c.pos.length));
+    posEntries[i].patch(_brBuffer(w, mdl, i, posEntries[i].name, c.pos, 3, 'position'));
+    nrmEntries[i].patch(_brBuffer(w, mdl, i, nrmEntries[i].name, c.normal, 3, 'normal'));
+    uvEntries[i].patch(_brBuffer(w, mdl, i, uvEntries[i].name, c.uv, 2, 'uv'));
+  }
+  for (const [method, translucent] of [[methods[1], false], [methods[2], true]]) {
+    const draws = chunks.map((c, i) => ({ c, i })).filter(({ c }) => materialData[c.mat].blend === translucent);
+    p = w.alloc(draws.length * 8 + 1); method.patch(p);
+    for (const { c, i } of draws) { w.u8(p, 4); w.u16(p + 1, c.mat); w.u16(p + 3, i); p += 8; }
+    w.u8(p, 1);
+  }
+  w.alloc(0, 32); w.u32(mdl + 4, w.length - mdl);
+  textures.forEach((t, i) => {
+    const pixels = encodeWiiRGBA8(t.rgba, t.width, t.height);
+    const at = w.alloc(0x40 + pixels.length, 32); texEntries[i].patch(at);
+    w.text(at, 'TEX0'); w.u32(at + 4, 0x40 + pixels.length); w.u32(at + 8, 3); w.u32(at + 12, -at);
+    w.u32(at + 16, 0x40); w.str(at + 20, at, t.name); w.u16(at + 28, t.width); w.u16(at + 30, t.height);
+    w.u32(at + 32, 6); w.u32(at + 36, 1); w.bytes.set(pixels, at + 0x40);
+  });
+  return [{ name: (opts.baseName || 'course_model') + '.brres', data: w.finish() }];
+}
+
 // ==== app_core.js ====
 // ============================================================================
 // app_core.js — renderer, scene objects, overlays, camera, picking, selection, undo
@@ -5106,6 +5493,7 @@ const ICONS = {
   eyeoff: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" stroke-opacity=".35"/><path d="M4 20 20 4"/>',
   layers: '<path d="M12 3 3 8l9 5 9-5z"/><path d="M3 12.5l9 5 9-5M3 17l9 5 9-5" stroke-opacity=".6"/>',
   sliders: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="15" r="2.2" style="fill:var(--chrome)"/><circle cx="12" cy="8" r="2.2" style="fill:var(--chrome)"/><circle cx="19" cy="13" r="2.2" style="fill:var(--chrome)"/>',
+  modifiers: '<path d="M14 4a5 5 0 0 0-6 6L3 15a3 3 0 0 0 4 4l5-5a5 5 0 0 0 6-6l-3 3-3-3z"/>',
   material: '<circle cx="12" cy="12" r="8.5"/><path d="M4.2 14.5c4 1.6 11.6 1.6 15.6 0" stroke-opacity=".55"/><circle cx="9" cy="9" r="2" fill="currentColor"/>',
   export: '<path d="M12 15V3.5M7.5 8 12 3.5 16.5 8"/><path d="M4.5 13v6.5h15V13"/>',
   import: '<path d="M12 3.5V15M7.5 10.5 12 15l4.5-4.5"/><path d="M4.5 13v6.5h15V13"/>',
@@ -5276,7 +5664,7 @@ tc.visible = false; tc.enabled = false;
 scene.add(tc);
 
 // ---------- materials ----------
-const DEFAULT_MAT = { id: 0, name: 'Default', color: '#c9ccd2', roughness: 0.55, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat' };
+const DEFAULT_MAT = { id: 0, name: 'Default', color: '#c9ccd2', roughness: 0.55, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
 const threeMatCache = new Map();
 const faceOrientMat = new THREE.ShaderMaterial({
   vertexShader: 'void main(){ gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
@@ -5285,7 +5673,7 @@ const faceOrientMat = new THREE.ShaderMaterial({
 });
 function matById(id) { return S.materials.find((m) => m.id === id) || null; }
 function newMaterial(name = 'Material', color = '#c9ccd2') {
-  const m = { id: _matNid++, name: uniqueMatName(name), color, roughness: 0.5, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat' };
+  const m = { id: _matNid++, name: uniqueMatName(name), color, roughness: 0.5, metalness: 0, alpha: 1, texture: null, filter: 'linear', useTexture: true, tint: false, wrap: 'repeat', shader: 'lit', alphaMode: 'auto', alphaCutoff: 0.5, doubleSided: true };
   S.materials.push(m);
   return m;
 }
@@ -5297,28 +5685,27 @@ function uniqueMatName(base) {
 function threeTexFor(imgId, filter, wrap) {
   const img = S.images.get(imgId);
   if (!img) return null;
-  if (!img.tex) {
-    img.tex = new THREE.Texture(img.el);
-    img.tex.colorSpace = THREE.SRGBColorSpace;
-    img.tex.wrapS = img.tex.wrapT = THREE.RepeatWrapping;
-    img.tex.anisotropy = 4;
-    img.tex.needsUpdate = true;
+  // Sampler state belongs to a material, not to the shared source image.
+  const near = filter === 'nearest', extend = wrap === 'extend';
+  const key = `${near}:${extend}`;
+  if (!img.textures) img.textures = new Map();
+  if (!img.textures.has(key)) {
+    const tex = new THREE.Texture(img.el);
+    tex.colorSpace = THREE.SRGBColorSpace;
+    tex.wrapS = tex.wrapT = extend ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
+    tex.magFilter = near ? THREE.NearestFilter : THREE.LinearFilter;
+    tex.minFilter = near ? THREE.NearestMipmapNearestFilter : THREE.LinearMipmapLinearFilter;
+    tex.anisotropy = near ? 1 : 4;
+    tex.needsUpdate = true;
+    img.textures.set(key, tex);
   }
-  const near = filter === 'nearest';
-  const wrapMode = wrap === 'extend' ? THREE.ClampToEdgeWrapping : THREE.RepeatWrapping;
-  if (img.tex.wrapS !== wrapMode) { img.tex.wrapS = img.tex.wrapT = wrapMode; img.tex.needsUpdate = true; }
-  if (img.tex.magFilter !== (near ? THREE.NearestFilter : THREE.LinearFilter)) {
-    img.tex.magFilter = near ? THREE.NearestFilter : THREE.LinearFilter;
-    img.tex.minFilter = near ? THREE.NearestMipmapNearestFilter : THREE.LinearMipmapLinearFilter;
-    img.tex.needsUpdate = true;
-  }
-  return img.tex;
+  return img.textures.get(key);
 }
 function threeMat(mat) {
   let e = threeMatCache.get(mat.id);
   if (!e) {
     const base = { side: THREE.DoubleSide, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 };
-    e = { solid: new THREE.MeshStandardMaterial({ ...base }), pbr: new THREE.MeshStandardMaterial({ ...base }) };
+    e = { solid: new THREE.MeshStandardMaterial({ ...base }), pbr: new THREE.MeshStandardMaterial({ ...base }), unlit: new THREE.MeshBasicMaterial({ ...base }) };
     threeMatCache.set(mat.id, e);
   }
   const xray = S.xray;
@@ -5326,15 +5713,19 @@ function threeMat(mat) {
   const base = tex && !mat.tint ? '#ffffff' : mat.color;
   e.solid.color.set(base);
   e.solid.roughness = 0.62; e.solid.metalness = 0;
-  e.pbr.color.set(base);
+  e.pbr.color.set(base); e.unlit.color.set(base); e.unlit.toneMapped = false;
   e.pbr.roughness = mat.roughness; e.pbr.metalness = mat.metalness;
-  for (const m of [e.solid, e.pbr]) if (m.map !== tex) { m.map = tex; m.needsUpdate = true; }
-  for (const m of [e.solid, e.pbr]) {
-    const a = m === e.pbr ? mat.alpha : 1;
-    const transparent = xray || a < 1;
+  for (const m of [e.solid, e.pbr, e.unlit]) if (m.map !== tex) { m.map = tex; m.needsUpdate = true; }
+  for (const m of [e.solid, e.pbr, e.unlit]) {
+    const a = mat.alphaMode === 'opaque' ? 1 : mat.alpha;
+    const transparent = xray || mat.alphaMode === 'blend' || (mat.alphaMode !== 'cutout' && mat.alphaMode !== 'opaque' && a < 1);
+    const cutoff = mat.alphaMode === 'cutout' ? (mat.alphaCutoff ?? 0.5) : 0;
+    if (m.alphaTest !== cutoff) { m.alphaTest = cutoff; m.needsUpdate = true; }
+    const side = mat.doubleSided !== false ? THREE.DoubleSide : THREE.FrontSide;
+    if (m.side !== side) { m.side = side; m.needsUpdate = true; }
     if (m.transparent !== transparent) { m.transparent = transparent; m.needsUpdate = true; }
     m.opacity = xray ? 0.32 * a : a;
-    m.depthWrite = !xray && a >= 1;
+    m.depthWrite = !transparent;
   }
   return e;
 }
@@ -5344,7 +5735,7 @@ function objMaterials(o) {
   return slots.map((id) => {
     const mat = matById(id) || DEFAULT_MAT;
     const e = threeMat(mat);
-    return S.shading === 'material' || S.shading === 'rendered' ? e.pbr : e.solid;
+    return mat.shader === 'unlit' ? e.unlit : S.shading === 'material' || S.shading === 'rendered' ? e.pbr : e.solid;
   });
 }
 function refreshMaterials() {
@@ -5358,8 +5749,8 @@ function uniqueObjName(base) {
   while (S.objects.some((o) => o.name === n)) n = `${base}.${String(i++).padStart(3, '0')}`;
   return n;
 }
-function createObject(name, mesh, { pos, quat, scl, materials, id, keepName } = {}) {
-  const o = { id: id || _nid++, name: keepName ? name : uniqueObjName(name), mesh, materials: materials ? materials.slice() : [], visible: true, selected: false, esel: emptySel(), activeFace: -1 };
+function createObject(name, mesh, { pos, quat, scl, materials, id, keepName, modifiers } = {}) {
+  const o = { id: id || _nid++, name: keepName ? name : uniqueObjName(name), mesh, modifiers: normalizeModifiers(modifiers), materials: materials ? materials.slice() : [], visible: true, selected: false, esel: emptySel(), activeFace: -1 };
   if (id && id >= _nid) _nid = id + 1;
   o.node = new THREE.Group();
   o.node.userData.obj = o;
@@ -5388,7 +5779,16 @@ function removeObject(o) {
 
 // ---------- render data ----------
 function rebuildObject(o) {
-  const m = o.mesh;
+  let m = o.mesh;
+  if (!(S.mode === 'edit' && o === S.active)) {
+    try { m = evaluateModifiers(o.mesh, o.modifiers); o.modifierError = null; }
+    catch (e) {
+      // Edits can increase the control mesh beyond the preview budget. Keep it editable.
+      if (o.modifierError !== e.message) toast(o.name + ': ' + e.message, true);
+      o.modifierError = e.message;
+    }
+  }
+  o.renderMesh = m;
   const nSlots = Math.max(1, o.materials.length);
   const lists = Array.from({ length: nSlots }, () => []);
   for (let fi = 0; fi < m.faces.length; fi++) {
@@ -5419,14 +5819,15 @@ function rebuildObject(o) {
   o.meshNode.geometry = geo;
   o.rd = { cornerV, cornerF, cornerC, triFace };
   updateGeomPositions(o, true);
-  updateGeomUVs(o);
+  updateGeomUVs(o, true);
   o.meshNode.material = objMaterials(o);
   o.node.visible = o.visible;
   refreshOverlays(o);
   requestRender();
 }
 function updateGeomPositions(o, skipOverlays) {
-  const m = o.mesh, P = m.verts, { cornerV, cornerF } = o.rd, geo = o.meshNode.geometry;
+  if (!skipOverlays && S.mode !== 'edit' && o.modifiers.some((m) => m.enabled && m.levels)) { rebuildObject(o); return; }
+  const m = o.renderMesh || o.mesh, P = m.verts, { cornerV, cornerF } = o.rd, geo = o.meshNode.geometry;
   const pos = geo.attributes.position.array, nor = geo.attributes.normal.array;
   for (let i = 0; i < cornerV.length; i++) { const p = P[cornerV[i]]; pos[i * 3] = p[0]; pos[i * 3 + 1] = p[1]; pos[i * 3 + 2] = p[2]; }
   if (m.smooth) {
@@ -5442,8 +5843,9 @@ function updateGeomPositions(o, skipOverlays) {
   if (!skipOverlays) refreshOverlays(o);
   requestRender();
 }
-function updateGeomUVs(o) {
-  const m = o.mesh, { cornerF, cornerC } = o.rd, geo = o.meshNode.geometry;
+function updateGeomUVs(o, fromRebuild = false) {
+  if (!fromRebuild && S.mode !== 'edit' && o.modifiers.some((m) => m.enabled && m.levels)) { rebuildObject(o); return; }
+  const m = o.renderMesh || o.mesh, { cornerF, cornerC } = o.rd, geo = o.meshNode.geometry;
   const uv = geo.attributes.uv.array;
   for (let i = 0; i < cornerF.length; i++) { const u = m.faces[cornerF[i]].uv[cornerC[i]] || [0, 0]; uv[i * 2] = u[0]; uv[i * 2 + 1] = u[1]; }
   geo.attributes.uv.needsUpdate = true;
@@ -5487,7 +5889,7 @@ function setPointsGeo(o, key, positions, colors, size, onTop) {
   ov.visible = true;
 }
 function refreshOverlays(o) {
-  const m = o.mesh, P = m.verts;
+  const m = o.renderMesh || o.mesh, P = m.verts;
   const editing = S.mode === 'edit' && o === S.active;
   const wire = S.shading === 'wire';
   const seeThrough = S.xray || wire;
@@ -5883,7 +6285,7 @@ function snapshot() {
   return {
     objects: S.objects.map((o) => ({
       id: o.id, name: o.name, mesh: cloneMesh(o.mesh), pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(),
-      materials: o.materials.slice(), visible: o.visible, selected: o.selected,
+      modifiers: normalizeModifiers(o.modifiers), materials: o.materials.slice(), visible: o.visible, selected: o.selected,
       esel: { verts: new Set(o.esel.verts), edges: new Set(o.esel.edges), faces: new Set(o.esel.faces) }, activeFace: o.activeFace,
     })),
     materials: S.materials.map((m) => ({ ...m })),
@@ -5904,6 +6306,7 @@ function restore(snap) {
       o = createObject(so.name, cloneMesh(so.mesh), { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials, id: so.id, keepName: true });
       S.objects.pop();
     }
+    o.modifiers = normalizeModifiers(so.modifiers);
     o.visible = so.visible; o.selected = so.selected; o.activeFace = so.activeFace;
     o.esel = { verts: new Set(so.esel.verts), edges: new Set(so.esel.edges), faces: new Set(so.esel.faces) };
     next.push(o);
@@ -5977,7 +6380,7 @@ function applyShadingEnv() {
   sun.visible = S.shading === 'rendered';
   shadowFloor.visible = S.shading === 'rendered';
   gridGroup.visible = S.shading !== 'rendered';
-  for (const m of [...threeMatCache.values()]) { m.solid.needsUpdate = true; m.pbr.needsUpdate = true; }
+  for (const m of [...threeMatCache.values()]) { m.solid.needsUpdate = true; m.pbr.needsUpdate = true; m.unlit.needsUpdate = true; }
 }
 let drawNav = () => {};
 function frame(now) {
@@ -6679,7 +7082,7 @@ function opDuplicate() {
     for (const x of S.objects) x.selected = false;
     let act = null;
     for (const o of objs) {
-      const c = createObject(o.name, cloneMesh(o.mesh), { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials });
+      const c = createObject(o.name, cloneMesh(o.mesh), { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials, modifiers: o.modifiers });
       c.selected = true;
       if (o === S.active || !act) act = c;
     }
@@ -7089,7 +7492,7 @@ function separateByMaterial(o) {
     const part = extractFaces(o.mesh, fs);
     for (const f of part.faces) f.mat = 0;
     const mid = o.materials[slot], mt = matById(mid);
-    const c = createObject(mt ? `${o.name}.${mt.name}` : o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: mid !== undefined ? [mid] : [] });
+    const c = createObject(mt ? `${o.name}.${mt.name}` : o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: mid !== undefined ? [mid] : [], modifiers: o.modifiers });
     c.selected = false; made++;
   }
   const keep = o.materials[used[0]];
@@ -7108,7 +7511,7 @@ function separateLoose(o) {
   for (const want of sets) {
     const vs = new Set(); o.mesh.verts.forEach((p, i) => { if (want.has(key(p))) vs.add(i); });
     const part = extractPart(o.mesh, vs);
-    const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials });
+    const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials, modifiers: o.modifiers });
     c.selected = false;
   }
   o.esel = emptySel();
@@ -7137,7 +7540,7 @@ function opSeparate(kind) {
     if (kind === 'selected') {
       const part = extractPart(o.mesh, new Set(o.esel.verts));
       o.esel = emptySel(); rebuildObject(o);
-      const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials });
+      const c = createObject(o.name, part, { pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(), materials: o.materials, modifiers: o.modifiers });
       c.selected = false; n = 1;
     } else n = kind === 'material' ? separateByMaterial(o) : separateLoose(o);
     if (!n) { toast(kind === 'material' ? 'This mesh uses only one material' : 'Mesh is already one piece', true); return false; }
@@ -7162,6 +7565,7 @@ function setMode(mode) {
     S.active.selected = true;
   }
   S.mode = mode;
+  for (const o of S.objects) rebuildObject(o);
   S.pendingTap = null; hint(null);
   if (S.active) flushSel();
   pushUndo(mode === 'edit' ? 'Edit Mode' : 'Object Mode');
@@ -7627,6 +8031,23 @@ async function loadImageFile(file) {
     return addImageFromCanvas(uniqueImageName(file.name || 'texture', photo ? '.jpg' : '.png'), c, mime);
   } finally { URL.revokeObjectURL(url); }
 }
+function downscaleMaterialImage(material, maxSize) {
+  const im = S.images.get(material.texture);
+  if (!im) throw new Error('Choose an image first');
+  const max = Number(maxSize);
+  if (![64, 128, 256, 512, 1024, 2048].includes(max)) throw new Error('Choose a supported image size');
+  const scale = Math.min(1, max / Math.max(im.width, im.height));
+  if (scale === 1) return false;
+  const c = document.createElement('canvas');
+  c.width = Math.max(1, Math.round(im.width * scale)); c.height = Math.max(1, Math.round(im.height * scale));
+  const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = material.filter !== 'nearest'; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(im.el, 0, 0, c.width, c.height);
+  // Copy on write: other materials and undo snapshots keep the original image.
+  const next = addImageFromCanvas(uniqueImageName(im.name, im.mime === 'image/jpeg' ? '.jpg' : '.png'), c, im.mime);
+  material.texture = next.id;
+  refreshMaterials(); pushUndo('Downscale Image'); uvRequest(); refreshSheet();
+  return true;
+}
 function generateTexture(kind, size = 1024) {
   const c = document.createElement('canvas'); c.width = c.height = size;
   const x = c.getContext('2d');
@@ -7668,10 +8089,14 @@ async function imageFromBytes(id, name, mime, bytes) {
     return img;
   } finally { URL.revokeObjectURL(url); }
 }
+function clearImages() {
+  for (const im of S.images.values()) for (const tex of im.textures?.values() || []) tex.dispose();
+  S.images.clear();
+}
 function pruneImages() {
   const used = new Set(S.materials.map((m) => m.texture).filter(Boolean));
   for (const s of UNDO.stack) for (const m of s.snap.materials) if (m.texture) used.add(m.texture);
-  for (const id of [...S.images.keys()]) if (!used.has(id)) { const im = S.images.get(id); if (im.tex) im.tex.dispose(); S.images.delete(id); }
+  for (const id of [...S.images.keys()]) if (!used.has(id)) { const im = S.images.get(id); for (const tex of im.textures?.values() || []) tex.dispose(); S.images.delete(id); }
 }
 
 // ---------- project (de)serialization ----------
@@ -7681,7 +8106,7 @@ function serializeProject() {
     app: 'PocketMesh', version: 1, saved: new Date().toISOString(),
     objects: S.objects.map((o) => ({
       id: o.id, name: o.name, pos: o.node.position.toArray(), quat: o.node.quaternion.toArray(), scl: o.node.scale.toArray(),
-      materials: o.materials, visible: o.visible, selected: o.selected,
+      modifiers: normalizeModifiers(o.modifiers), materials: o.materials, visible: o.visible, selected: o.selected,
       mesh: { verts: o.mesh.verts, faces: o.mesh.faces, looseEdges: o.mesh.looseEdges, seams: [...o.mesh.seams], smooth: o.mesh.smooth },
     })),
     materials: S.materials,
@@ -7697,13 +8122,14 @@ async function loadProject(data) {
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
-  S.objects = []; S.materials = []; S.images.clear();
-  S.active = null; S.mode = 'object';
+  clearImages();
+  S.objects = []; S.materials = [];
+  S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
   for (const so of data.objects) {
     const mesh = { verts: so.mesh.verts || [], faces: (so.mesh.faces || []).map((f) => ({ v: f.v, uv: f.uv || f.v.map(() => [0, 0]), mat: f.mat | 0 })), looseEdges: so.mesh.looseEdges || [], seams: new Set(so.mesh.seams || []), smooth: !!so.mesh.smooth };
-    const o = createObject(so.name, mesh, { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials || [], id: so.id, keepName: true });
+    const o = createObject(so.name, mesh, { pos: so.pos, quat: so.quat, scl: so.scl, materials: so.materials || [], modifiers: so.modifiers, id: so.id, keepName: true });
     o.visible = so.visible !== false; o.selected = !!so.selected;
   }
   S.active = S.objects.find((o) => o.id === data.active) || S.objects[0] || null;
@@ -7791,7 +8217,7 @@ function saveProjectFile() {
 
 // ---------- export ----------
 function hexToLinear(hex) { const c = new THREE.Color(hex); return [c.r, c.g, c.b]; }
-function buildExportScene(selectedOnly) {
+function buildExportScene(selectedOnly, brresTextureSize = null) {
   const objs = S.objects.filter((o) => o.visible && (!selectedOnly || o.selected));
   const matIndex = new Map(), mats = [];
   const usedTexNames = new Map();
@@ -7805,26 +8231,35 @@ function buildExportScene(selectedOnly) {
       let nm = usedTexNames.get(im.id);
       if (!nm) { nm = im.name; let i = 1; while ([...usedTexNames.values()].includes(nm)) nm = im.name.replace(/(\.[a-z]+)$/i, `_${i++}$1`); usedTexNames.set(im.id, nm); }
       texture = { name: nm, mime: im.mime, bytes: im.bytes, width: im.width, height: im.height, filter: m.filter };
+      if (brresTextureSize) {
+        const factor = Math.min(1, brresTextureSize / Math.max(im.width, im.height));
+        const pot = (n) => 2 ** Math.floor(Math.log2(Math.max(1, n * factor)));
+        const c = document.createElement('canvas'); c.width = pot(im.width); c.height = pot(im.height);
+        const ctx = c.getContext('2d'); ctx.imageSmoothingEnabled = m.filter !== 'nearest'; ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(im.el, 0, 0, c.width, c.height);
+        texture.width = c.width; texture.height = c.height; texture.rgba = ctx.getImageData(0, 0, c.width, c.height).data;
+      }
     }
     // an untinted image is the whole base color (as in Blender), so write white for the color factor
-    mats.push({ name: m.name, color: texture && !m.tint ? [1, 1, 1] : hexToLinear(m.color), alpha: m.alpha, roughness: m.roughness, metalness: m.metalness, texture });
+    mats.push({ name: m.name, color: texture && !m.tint ? [1, 1, 1] : hexToLinear(m.color), alpha: m.alpha, roughness: m.roughness, metalness: m.metalness, texture, shader: m.shader, alphaMode: m.alphaMode, alphaCutoff: m.alphaCutoff, doubleSided: m.doubleSided, wrap: m.wrap });
     matIndex.set(id, mats.length - 1);
     return mats.length - 1;
   };
   const objects = objs.map((o) => ({
     name: o.name,
     position: o.node.position.toArray(), quaternion: o.node.quaternion.toArray(), scale: o.node.scale.toArray(),
-    mesh: o.mesh,
-    materials: o.materials.map(matFor).filter((x) => x !== null),
+    mesh: evaluateModifiers(o.mesh, o.modifiers),
+    materials: o.materials.map(matFor),
   }));
   return { objects, materials: mats };
 }
 function runExport(fmt, opts) {
-  const scene = buildExportScene(opts.selectedOnly);
+  const scene = buildExportScene(opts.selectedOnly, fmt === 'brres' ? Math.max(64, Math.min(1024, Number(opts.textureSize) || 512)) : null);
   if (!scene.objects.length) throw new Error(opts.selectedOnly ? 'No selected objects to export' : 'Nothing to export');
   const eo = { yUp: opts.yUp, applyTransforms: opts.applyTransforms, triangulate: opts.triangulate, baseName: opts.baseName };
   let files;
-  if (fmt === 'obj') files = exportOBJ(scene, eo);
+  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: opts.scale });
+  else if (fmt === 'obj') files = exportOBJ(scene, eo);
   else if (fmt === 'fbx') files = exportFBX(scene, eo);
   else if (fmt === 'dae') files = exportDAE(scene, eo);
   else if (fmt === 'glb') files = exportGLTF(scene, { ...eo, binary: true });
@@ -7853,6 +8288,33 @@ function importOBJText(text, fileName) {
   return res.objects.length;
 }
 
+async function importMaterialFiles(files) {
+  const warnings = [], loaded = new Map();
+  const basename = (name) => name.replaceAll('\\', '/').split('/').pop().toLowerCase();
+  let count = 0;
+  for (const file of files.filter((f) => /\.mtl$/i.test(f.name))) {
+    const parsed = importMTL(await file.text()); warnings.push(...parsed.warnings);
+    for (const data of parsed.materials) {
+      const m = S.materials.find((m) => m.name === data.name) || newMaterial(data.name);
+      m.color = '#' + new THREE.Color(...data.color).getHexString();
+      m.alpha = data.alpha; m.alphaMode = data.alpha < 1 ? 'blend' : 'opaque';
+      m.roughness = data.roughness; m.shader = 'unlit';
+      m.texture = null; m.useTexture = false; m.tint = true;
+      if (data.image) {
+        const key = basename(data.image), matches = files.filter((f) => basename(f.name) === key);
+        if (matches.length === 1) {
+          if (!loaded.has(key)) loaded.set(key, await loadImageFile(matches[0]));
+          m.texture = loaded.get(key).id; m.useTexture = true;
+        } else warnings.push(data.name + ': select the image ' + data.image + ' with the MTL, or upload it in Material.');
+      }
+      if (S.active && !S.active.materials.includes(m.id)) S.active.materials.push(m.id);
+      count++;
+    }
+  }
+  for (const o of S.objects) rebuildObject(o);
+  return { count, warnings };
+}
+
 // ==== app_ui.js ====
 // ============================================================================
 // app_ui.js — header, tools, shelf, menus, panels, gestures, keyboard, boot
@@ -7879,10 +8341,10 @@ function openSheet(title, build, { panel = false, kind = null } = {}) {
   SHEET.kind = kind;
 }
 function closeSheet() { $('#sheet').hidden = true; $('#scrim').hidden = true; SHEET.refresh = null; SHEET.kind = null; }
-function refreshSheet() {
+function refreshSheet(force = false) {
   if (!SHEET.refresh || $('#sheet').hidden) return;
   const a = document.activeElement;
-  if (a && $('#sheet').contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) return;
+  if (!force && a && $('#sheet').contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) return;
   SHEET.refresh();
 }
 function menuSheet(title, items) {
@@ -8015,9 +8477,10 @@ function buildSubbar() {
   const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Selection mode' });
   for (const [k, l] of [['set', 'Set'], ['add', 'Add'], ['sub', 'Sub']]) {
     const b = h('button', { class: S.selOp === k ? 'on' : '', style: { width: '44px', fontSize: '13px', fontWeight: '600' }, 'aria-label': { set: 'Replace selection', add: 'Add to / toggle selection', sub: 'Remove from selection' }[k] }, l);
-    b.addEventListener('click', () => { S.selOp = k; buildSubbar(); });
+    b.addEventListener('click', () => { S.selOp = k; S.multiSelect = false; hint(null); buildSubbar(); });
     seg.append(b);
   }
+  if (S.multiSelect) bar.append(chip('Multiselect', 'Done', () => { S.multiSelect = false; S.selOp = 'set'; hint(null); buildSubbar(); }, { on: true }));
   bar.append(seg, h('span', { class: 'vsep' }), chip('', '', () => openSettings(), { icon: 'sliders', aria: 'Settings' }));
 }
 
@@ -8179,7 +8642,7 @@ function buildShelf() {
       shelfBtn('Shading', 'smooth', () => menuSheet('Shading', [{ label: 'Shade Smooth', icon: 'smooth', run: () => opNormals('smooth') }, { label: 'Shade Flat', icon: 'cube', run: () => opNormals('flat') }, { group: 'Normals' }, { label: 'Recalculate Outside', icon: 'normals', run: () => opNormals('outside') }, { label: 'Flip Normals', icon: 'normals', run: () => opNormals('flip') }]), true),
       shelfBtn('Origin', 'origin', menuOrigin, true), shelfBtn('Apply', 'check', menuApply, true), shelfBtn('Mirror', 'mirror', menuMirror, true), shelfBtn('Snap', 'magnet', menuSnap, true),
       shelfBtn('Hide', 'hide', () => menuSheet('Visibility', [{ label: 'Hide Selected', icon: 'eyeoff', key: 'H', run: () => opHide('hide') }, { label: 'Reveal Hidden', icon: 'eye', key: 'Alt H', run: () => opHide('reveal') }]), true), g(),
-      shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
+      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
     );
   } else {
     sh.append(
@@ -8190,7 +8653,7 @@ function buildShelf() {
       shelfBtn('Mesh', 'cube', menuMesh, true), g(),
       shelfBtn('UV', 'uv', menuUVFrom3D, true), shelfBtn('Seams', 'seam', () => menuSheet('UV Seams', [{ label: 'Mark Seam', icon: 'seam', desc: 'Selected edges become cuts for Unwrap', run: () => opSeam(true) }, { label: 'Clear Seam', icon: 'seam', run: () => opSeam(false) }]), true),
       shelfBtn('Snap', 'magnet', menuSnap, true), shelfBtn('Mirror', 'mirror', menuMirror, true), g(),
-      shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
+      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
     );
   }
   if (S.view === 'split') sh.append(g(), shelfBtn('UV Shelf', 'uv', () => { S.focus = 'uv'; buildShelf(); }));
@@ -8348,8 +8811,9 @@ function menuFile() {
     { label: 'Open Project…', icon: 'folder', desc: 'A .pocketmesh.json file', run: () => $('#fileProj').click() },
     { label: 'Save Project', icon: 'save', desc: 'Save to Files, iCloud Drive, AirDrop…', run: saveProjectFile },
     { group: 'Exchange' },
-    { label: 'Export Model…', icon: 'export', desc: 'OBJ · FBX · DAE · glTF', run: openExport },
-    { label: 'Import OBJ…', icon: 'import', run: () => $('#fileObj').click() },
+    { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
+    { label: 'Export as BRRES…', icon: 'export', desc: 'Wii model and textures', run: () => { settingsSet('export', { ...settingsGet('export', {}), fmt: 'brres', zip: false }); openExport(); } },
+    { label: 'Import OBJ + materials…', desc: 'Select OBJ, MTL and images together', icon: 'import', run: () => $('#fileObj').click() },
     { label: 'Export UV Layout (PNG)', icon: 'image', desc: 'Paint over it in another app', run: exportUVLayout },
     { group: 'Help' },
     { label: 'Gestures & Tips', icon: 'info', run: openHelp },
@@ -8370,7 +8834,8 @@ function confirmNew() {
 function newScene() {
   if (TF.active) tfCancel(); if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
-  S.objects = []; S.materials = []; S.images.clear(); S.mode = 'object'; S.active = null; S.uvSel = new Set();
+  clearImages(); S.multiSelect = false; S.selOp = 'set';
+  S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
   S.cursor.set(0, 0, 0);
   const mat = newMaterial('Material', '#c9ccd2');
   const o = createObject('Cube', primCube(), { materials: [mat.id] });
@@ -8437,6 +8902,42 @@ function buildOutliner(body) {
     body.append(row);
   }
 }
+function openModifiers() { openSheet('Modifiers', buildModifiers, { panel: true, kind: 'modifiers' }); }
+function changeModifiers(o, next, label) {
+  try {
+    evaluateModifiers(o.mesh, next); // Validate the allocation before changing state.
+    o.modifiers = normalizeModifiers(next);
+    rebuildObject(o); pushUndo(label); onSelectionChanged(); refreshSheet(true);
+  } catch (e) { toast(e.message, true); refreshSheet(true); }
+}
+function buildModifiers(body) {
+  const o = S.active;
+  if (!o) { body.append(h('p', { class: 'muted' }, 'Select an object to add a modifier.')); return; }
+  if (o.modifierError) body.append(h('p', { class: 'muted' }, o.modifierError + ' Showing the original mesh until you lower the level.'));
+  const m = o.modifiers[0];
+  if (!m) {
+    const add = h('button', { class: 'btn primary' }, h('span', { html: icon('plus') }), 'Add Subdivision Surface');
+    add.addEventListener('click', () => changeModifiers(o, [{ type: 'subdivision', levels: 1 }], 'Add Subdivision Surface'));
+    body.append(add);
+  } else {
+    const change = (key, value) => changeModifiers(o, [{ ...o.modifiers[0], [key]: value }], 'Subdivision Settings');
+    const card = h('div', { class: 'card' }, h('h3', {}, 'Subdivision Surface'),
+      field('Method', selectInput(m.method, [['catmull-clark', 'Catmull–Clark'], ['simple', 'Simple']], (v) => change('method', v), 'Subdivision method')),
+      field('Levels', selectInput(m.levels, [0, 1, 2, 3].map((v) => [v, String(v)]), (v) => change('levels', +v), 'Subdivision levels')),
+      checkInput('Enabled in Object Mode and exports', m.enabled, (v) => change('enabled', v)));
+    const apply = h('button', { class: 'btn primary', disabled: S.mode !== 'object' || !m.enabled }, 'Apply to mesh');
+    apply.addEventListener('click', () => {
+      try { const mesh = evaluateModifiers(o.mesh, o.modifiers); o.mesh = mesh; o.modifiers = []; o.esel = emptySel(); o.activeFace = -1; S.uvSel.clear(); rebuildObject(o); pushUndo('Apply Subdivision'); onSelectionChanged(); }
+      catch (e) { toast(e.message, true); }
+    });
+    const remove = h('button', { class: 'btn danger' }, 'Remove');
+    remove.addEventListener('click', () => changeModifiers(o, [], 'Remove Subdivision'));
+    card.append(h('div', { class: 'row' }, apply, remove));
+    body.append(card);
+  }
+  body.append(h('p', { class: 'muted' }, 'Edit Mode keeps the original control mesh. Object Mode and exports use the subdivided surface. Apply in Object Mode to edit the new vertices. UV seams and face materials are preserved.'));
+}
+
 function openMaterialPanel() { openSheet('Material', buildMaterialPanel, { panel: true, kind: 'material' }); }
 const PALETTE = ['#f2f2f2', '#c9ccd2', '#7d828c', '#2b2e35', '#d8402f', '#f08a24', '#f2c230', '#5fb346', '#2f9e8f', '#3b7dd8', '#7a4fd1', '#d14f9a', '#8a5a3b', '#e8c9a0'];
 function ensureMaterial(o) {
@@ -8483,6 +8984,9 @@ function buildMaterialPanel(body) {
     slots.append(h('div', { class: 'row' }, asg, sel));
   } else if (S.mode === 'object' && o.materials.length > 1) slots.append(h('p', { class: 'muted', style: { margin: 0 } }, 'To give faces different materials, go to Edit Mode, select faces, then tap “Assign”.'));
   body.append(slots);
+  const importMat = h('button', { class: 'btn' }, 'Import MTL + images…');
+  importMat.addEventListener('click', () => $('#fileMat').click());
+  body.append(importMat);
   // ---- which material + name
   if (mt) {
     const pick = selectInput(mt.id, [...S.materials.map((m) => [m.id, m.name]), ['__new', '+ New material']], (v) => {
@@ -8531,6 +9035,12 @@ function buildMaterialPanel(body) {
     if (im) {
       base.append(h('div', { class: 'texprev' + (mt.filter === 'nearest' ? ' px' : ''), style: { backgroundImage: `url(${im.thumbBig || (im.thumbBig = im.el.toDataURL('image/png'))})` } }),
         h('p', { class: 'muted', style: { margin: 0 } }, `${im.name} · ${im.width}×${im.height}`));
+      let maxSize = 512;
+      const size = selectInput(maxSize, [64, 128, 256, 512, 1024, 2048].map((n) => [n, n + ' px']), (v) => { maxSize = +v; }, 'Maximum image size');
+      const resize = h('button', { class: 'btn' }, 'Downscale image');
+      resize.addEventListener('click', () => { try { if (!downscaleMaterialImage(mt, maxSize)) toast('Image is already within that size'); } catch (e) { toast(e.message, true); } });
+      base.append(field('Longest side', size), resize, h('p', { class: 'muted' }, 'Keeps proportions and transparency. Creates a smaller copy for this material; Undo restores the original.'));
+
     }
     base.append(field('Interpolation', segButtons(mt.filter, [['linear', 'Linear'], ['nearest', 'Closest']], (v) => { mt.filter = v; live(); pushUndo('Interpolation'); refreshSheet(); })),
       field('Extension', segButtons(mt.wrap || 'repeat', [['repeat', 'Repeat'], ['extend', 'Extend']], (v) => { mt.wrap = v; live(); pushUndo('Texture Extension'); })),
@@ -8552,6 +9062,10 @@ function buildMaterialPanel(body) {
   // ---- surface
   if (mt) {
     body.append(h('div', { class: 'card' }, h('h3', {}, 'Surface'),
+      field('Shader', selectInput(mt.shader || 'lit', [['lit', 'Lit / PBR preview'], ['unlit', 'Unlit · Wii color/texture']], (v) => { mt.shader = v; live(); pushUndo('Shader'); }, 'Material shader')),
+      field('Transparency', selectInput(mt.alphaMode || 'auto', [['auto', 'Automatic'], ['opaque', 'Opaque'], ['cutout', 'Alpha cutout'], ['blend', 'Alpha blend']], (v) => { mt.alphaMode = v; live(); pushUndo('Transparency'); refreshSheet(true); }, 'Transparency mode')),
+      mt.alphaMode === 'cutout' ? field('Cutout threshold', sliderInput(mt.alphaCutoff ?? 0.5, 0, 1, 0.01, (v) => { mt.alphaCutoff = v; live(); }, () => pushUndo('Cutout Threshold'))) : null,
+      checkInput('Double sided', mt.doubleSided !== false, (v) => { mt.doubleSided = v; live(); pushUndo('Material Sides'); }),
       field('Roughness', sliderInput(mt.roughness, 0, 1, 0.01, (v) => { mt.roughness = v; refreshMaterials(); }, () => pushUndo('Roughness'))),
       field('Metallic', sliderInput(mt.metalness, 0, 1, 0.01, (v) => { mt.metalness = v; refreshMaterials(); }, () => pushUndo('Metallic'))),
       field('Alpha', sliderInput(mt.alpha, 0, 1, 0.01, (v) => { mt.alpha = v; refreshMaterials(); }, () => pushUndo('Alpha'))),
@@ -8588,17 +9102,37 @@ $('#fileProj').addEventListener('change', async (e) => {
   catch (err) { toast(err.message || 'Could not open that file', true); }
 });
 $('#fileObj').addEventListener('change', async (e) => {
-  const f = e.target.files && e.target.files[0];
-  e.target.value = '';
-  if (!f) return;
+  const files = [...(e.target.files || [])]; e.target.value = '';
+  if (!files.length) return;
+  const before = snapshot(), history = UNDO.stack.slice(), historyIndex = UNDO.idx;
   try {
-    if (!/\.obj$/i.test(f.name)) throw new Error('Choose a .obj file');
+    const objs = files.filter((f) => /\.obj$/i.test(f.name));
+    if (!objs.length) throw new Error('Select an OBJ, with optional MTL and image files');
     if (S.mode === 'edit') setMode('object');
-    const n = importOBJText(await f.text(), f.name);
-    pushUndo('Import OBJ'); onSelectionChanged(); frameSelected();
-    toast(`Imported ${n} object${n > 1 ? 's' : ''}`);
-  } catch (err) { toast(err.message || 'Could not read that OBJ', true); }
+    let count = 0;
+    for (const f of objs) count += importOBJText(await f.text(), f.name);
+    const materials = await importMaterialFiles(files);
+    pushUndo('Import OBJ + Materials'); onSelectionChanged(); frameSelected();
+    showImportResult(count + ' object(s), ' + materials.count + ' material(s)', materials.warnings);
+  } catch (err) { UNDO.stack = history; UNDO.idx = historyIndex; restore(before); onHistoryChanged(); toast(err.message || 'Could not import', true); }
 });
+$('#fileMat').addEventListener('change', async (e) => {
+  const files = [...(e.target.files || [])]; e.target.value = '';
+  if (!files.length) return;
+  const before = snapshot();
+  try {
+    if (!files.some((f) => /\.mtl$/i.test(f.name))) throw new Error('Select an MTL and its image files together');
+    const result = await importMaterialFiles(files);
+    pushUndo('Import Materials'); onSelectionChanged();
+    showImportResult(result.count + ' material(s)', result.warnings);
+  } catch (e) { restore(before); toast(e.message, true); }
+});
+function showImportResult(summary, warnings) {
+  if (!warnings.length) { toast('Imported ' + summary); return; }
+  openSheet('Import results', (body) => {
+    body.append(h('p', {}, 'Imported ' + summary), ...warnings.map((w) => h('p', { class: 'muted' }, w)));
+  });
+}
 function exportUVLayout() {
   if (!S.active || !S.active.mesh.faces.length) { toast('Select an object with faces', true); return; }
   const c = uvLayoutCanvas(settingsGet('uvLayoutSize', 1024));
@@ -8611,29 +9145,34 @@ function buildExport(body) {
   if (st.selectedOnly === undefined) st.selectedOnly = anySel;
   const save = () => settingsSet('export', st);
   const notes = {
+    brres: 'Wii model + textures (course, MDL0 v11). For RiiStudio, BrawlCrate and noclip. A playable track also needs KCL collision, KMP race data and an SZS package.',
     obj: 'Wavefront OBJ + MTL. Comes as a .zip with its textures; tap the zip in Files to unpack it.',
     fbx: 'Binary FBX 7.4 with textures embedded. Opens in Blender, Unity, Unreal, Maya.',
     dae: 'COLLADA 1.4.1. Comes as a .zip with its textures when it has any.',
     glb: 'glTF 2.0 binary, everything in one file. Best for web, AR Quick Look tools, Godot.',
     gltf: 'glTF 2.0 text file with embedded data.',
   };
-  const fmts = [['obj', 'OBJ'], ['fbx', 'FBX'], ['dae', 'DAE'], ['glb', 'GLB'], ['gltf', 'glTF']];
+  const fmts = [['brres', 'BRRES'], ['obj', 'OBJ'], ['fbx', 'FBX'], ['dae', 'DAE'], ['glb', 'GLB'], ['gltf', 'glTF']];
   const card = h('div', { class: 'card' }, h('h3', {}, 'Format'), segButtons(st.fmt, fmts, (v) => { st.fmt = v; save(); refreshSheet(); }), h('p', { class: 'muted', style: { margin: 0 } }, notes[st.fmt]));
   const nameIn = h('input', { type: 'text', 'aria-label': 'File name', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false' });
-  nameIn.value = settingsGet('exportName', (S.active && S.active.name) || 'model');
-  nameIn.addEventListener('change', () => settingsSet('exportName', nameIn.value));
+  nameIn.value = st.fmt === 'brres' ? settingsGet('brresName', 'course_model') : settingsGet('exportName', (S.active && S.active.name) || 'model');
+  nameIn.addEventListener('change', () => settingsSet(st.fmt === 'brres' ? 'brresName' : 'exportName', nameIn.value));
   nameIn.addEventListener('keydown', (e) => e.stopPropagation());
   const opts = h('div', { class: 'card' }, h('h3', {}, 'Options'), field('File name', nameIn),
     checkInput(`Selected objects only${anySel ? '' : ' (nothing selected)'}`, st.selectedOnly && anySel, (v) => { st.selectedOnly = v; save(); }),
-    checkInput('Apply object transforms', st.applyTransforms, (v) => { st.applyTransforms = v; save(); }),
-    checkInput('Triangulate faces', st.triangulate || st.fmt === 'glb' || st.fmt === 'gltf', (v) => { st.triangulate = v; save(); }),
-    st.fmt === 'glb' || st.fmt === 'gltf' ? null : checkInput('Y axis up (most apps expect this)', st.yUp, (v) => { st.yUp = v; save(); }),
+    st.fmt === 'brres' ? null : checkInput('Apply object transforms', st.applyTransforms, (v) => { st.applyTransforms = v; save(); }),
+    st.fmt === 'brres' ? null : checkInput('Triangulate faces', st.triangulate || st.fmt === 'glb' || st.fmt === 'gltf', (v) => { st.triangulate = v; save(); }),
+    st.fmt === 'brres' || st.fmt === 'glb' || st.fmt === 'gltf' ? null : checkInput('Y axis up (most apps expect this)', st.yUp, (v) => { st.yUp = v; save(); }),
     checkInput('Always wrap in a .zip', st.zip, (v) => { st.zip = v; save(); }));
-  const go = h('button', { class: 'btn primary', style: { height: '46px', fontSize: '17px', justifyContent: 'center' } }, h('span', { html: icon('export') }), 'Export & Save…');
+  if (st.fmt === 'brres') opts.append(
+    field('Wii units per model unit', numInput(st.scale ?? 1, (v) => { st.scale = v; save(); }, { min: 0.001, max: 100000 })),
+    field('Maximum texture size', selectInput(st.textureSize || 512, [64, 128, 256, 512, 1024].map((v) => [v, v + ' px']), (v) => { st.textureSize = +v; save(); }, 'BRRES texture size')),
+    h('p', { class: 'muted' }, 'Exports evaluated modifiers, applies transforms and converts Z-up to Wii Y-up. Textures are resized to power-of-two dimensions and embedded as RGBA8. Basic unlit color/texture, cutout and alpha blend are supported; PBR lighting and metallic effects are not exported.'));
+  const go = h('button', { class: 'btn primary', style: { height: '46px', fontSize: '17px', justifyContent: 'center' } }, h('span', { html: icon('export') }), st.fmt === 'brres' ? 'Export & Send BRRES…' : 'Export & Save…');
   go.addEventListener('click', () => {
     try {
       const base = safeFileName(nameIn.value, 'model');
-      const r = runExport(st.fmt, { selectedOnly: st.selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base });
+      const r = runExport(st.fmt, { selectedOnly: st.selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
       shareOrDownload(r.name, r.data);
       const kb = (r.data.length || r.data.byteLength || 0) / 1024;
       $('#exportInfo').textContent = `${r.name} · ${kb > 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(kb)) + ' KB'}${r.count > 1 ? ` · ${r.count} files inside` : ''}`;
@@ -8691,6 +9230,8 @@ function openHelp() {
       tip('Double-tap an edge', 'selects its whole edge loop.'),
       tip('Set / Add / Sub', 'controls whether taps and box selections replace, add to or remove from the selection.'),
       tip('Adjust Last Operation', 'appears bottom-left after adding shapes or using tools: change segments, cuts, margins and more.'),
+      tip('Multiselect', 'Hold a vertex, edge, face or object for a moment, then tap to add or remove more. Tap Done in the top bar to finish.'),
+      tip('Modifiers', 'The wrench opens Subdivision Surface. Edit the control mesh in Edit Mode; preview and export the smooth result in Object Mode.'),
       tip('Textures', 'Material → Choose image, then UV → Unwrap. Use the UV view (top-right button) to straighten and pack.'),
       tip('UV view', 'pinch to zoom, twist to rotate the view (clicks to 0/90/180/270°). The UV Rotate tool clicks to the same angles.'),
       tip('Keyboard', 'works too: Tab, G R S, X Y Z, E, I, Ctrl R, A, F, M, U, Shift A, Shift D, Ctrl Z.'),
@@ -8744,11 +9285,34 @@ setSelectMode = function (m) { _origSetSelectMode(m); onModeChanged(); };
 
 // ---------- 3D viewport gestures ----------
 const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastTap: null };
+function cancelHold() { clearTimeout(G.holdTimer); G.holdTimer = null; }
+function beginHold(e, p) {
+  cancelHold();
+  if (e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+  const object = S.active, mode = S.mode, selectMode = S.selectMode;
+  G.holdTimer = setTimeout(() => {
+    if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+    const el = S.mode === 'edit' && S.active ? pickElement(p.x, p.y, e.pointerType === 'mouse' ? 14 : 28) : null;
+    const ob = S.mode === 'object' ? pickObject(p.x, p.y) : null;
+    if (!el && !ob) return;
+    S.selOp = 'add'; S.multiSelect = true;
+    if (el) {
+      // A hold always adds its target; subsequent taps toggle it.
+      const selected = el.type === 'vert' ? object.esel.verts.has(el.i) : el.type === 'edge' ? object.esel.edges.has(el.key) : object.esel.faces.has(el.i);
+      if (!selected) toggleInSel(el, 'add');
+    } else { ob.selected = true; S.active = ob; }
+    G.mode = 'held'; G.lastTap = null;
+    buildSubbar(); onSelectionChanged();
+    hint('Multiselect · tap to add/remove · Done to finish');
+    if (navigator.vibrate) navigator.vibrate(15);
+  }, 450);
+}
 function rel(e, el = c3d) { const r = el.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 function twoInfo() { const [a, b] = [...G.p.values()]; return { mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y), ang: Math.atan2(b.y - a.y, b.x - a.x) }; }
 function twistView(dth) { CAM.anim = null; CAM.yaw += CAM.pitch < -0.01 ? -dth : dth; CAM.viewName = null; applyCamera(); }
 c3d.addEventListener('contextmenu', (e) => e.preventDefault());
 c3d.addEventListener('pointerdown', (e) => {
+  cancelHold();
   S.focus = '3d';
   if (S.view === 'split' && $('#shelf').dataset.focus !== '3d') { $('#shelf').dataset.focus = '3d'; buildShelf(); }
   if (tc.enabled && (tc.dragging || tc.axis)) return;
@@ -8762,6 +9326,7 @@ c3d.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
+    if (G.mode === 'pending') beginHold(e, p);
   } else if (G.p.size === 2) {
     if (G.mode === 'box') { $('#boxrect').hidden = true; }
     G.mode = 'two'; G.two = twoInfo(); G.twist = 0; G.twisting = false;
@@ -8782,6 +9347,7 @@ c3d.addEventListener('pointermove', (e) => {
   const dx = p.x - pt.x, dy = p.y - pt.y;
   pt.x = p.x; pt.y = p.y;
   if (Math.hypot(p.x - pt.x0, p.y - pt.y0) > (e.pointerType === 'mouse' ? 4 : 9)) G.moved = true;
+  if (G.moved) cancelHold();
   if (G.mode === 'two' && G.p.size === 2) {
     const t = twoInfo();
     let dth = Math.atan2(Math.sin(t.ang - G.two.ang), Math.cos(t.ang - G.two.ang));
@@ -8822,6 +9388,7 @@ c3d.addEventListener('pointermove', (e) => {
   }
 });
 function endPointer(e) {
+  cancelHold();
   if (!G.p.has(e.pointerId)) return;
   const pt = G.p.get(e.pointerId);
   G.p.delete(e.pointerId);
@@ -8839,6 +9406,10 @@ function endPointer(e) {
 }
 c3d.addEventListener('pointerup', endPointer);
 c3d.addEventListener('pointercancel', endPointer);
+c3d.addEventListener('lostpointercapture', endPointer);
+function cancelViewportGesture() { cancelHold(); G.p.clear(); G.mode = null; $('#boxrect').hidden = true; }
+window.addEventListener('blur', cancelViewportGesture);
+document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
 c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('gesturechange', (e) => e.preventDefault());
@@ -8850,7 +9421,7 @@ function handleTap(x, y, ptype) {
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
   if (S.tool === 'cursor') { placeCursor(x, y); return; }
   const now = performance.now();
-  const dbl = G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
+  const dbl = !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
   G.lastTap = { t: now, x, y };
   if (S.mode === 'edit' && S.active) {
     if (dbl && S.selectMode !== 'vert') { G.lastTap = null; loopSelectAt(x, y, 'loop', S.selOp === 'sub' ? 'sub' : 'add'); return; }
@@ -9088,7 +9659,7 @@ async function boot() {
   window.addEventListener('resize', () => { requestRender(); uvRequest(); });
   c3d.addEventListener('webglcontextlost', (e) => { e.preventDefault(); }, false);
   c3d.addEventListener('webglcontextrestored', () => {
-    for (const im of S.images.values()) if (im.tex) im.tex.needsUpdate = true;
+    for (const im of S.images.values()) for (const tex of im.textures?.values() || []) tex.needsUpdate = true;
     envTex = null; applyShadingEnv();
     for (const o of S.objects) rebuildObject(o);
     refreshAllObjects(); requestRender();
@@ -9105,7 +9676,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { S, CAM, UNDO, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { S, CAM, UNDO, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

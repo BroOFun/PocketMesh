@@ -23,10 +23,10 @@ function openSheet(title, build, { panel = false, kind = null } = {}) {
   SHEET.kind = kind;
 }
 function closeSheet() { $('#sheet').hidden = true; $('#scrim').hidden = true; SHEET.refresh = null; SHEET.kind = null; }
-function refreshSheet() {
+function refreshSheet(force = false) {
   if (!SHEET.refresh || $('#sheet').hidden) return;
   const a = document.activeElement;
-  if (a && $('#sheet').contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) return;
+  if (!force && a && $('#sheet').contains(a) && (a.tagName === 'INPUT' || a.tagName === 'SELECT')) return;
   SHEET.refresh();
 }
 function menuSheet(title, items) {
@@ -159,9 +159,10 @@ function buildSubbar() {
   const seg = h('div', { class: 'seg', role: 'group', 'aria-label': 'Selection mode' });
   for (const [k, l] of [['set', 'Set'], ['add', 'Add'], ['sub', 'Sub']]) {
     const b = h('button', { class: S.selOp === k ? 'on' : '', style: { width: '44px', fontSize: '13px', fontWeight: '600' }, 'aria-label': { set: 'Replace selection', add: 'Add to / toggle selection', sub: 'Remove from selection' }[k] }, l);
-    b.addEventListener('click', () => { S.selOp = k; buildSubbar(); });
+    b.addEventListener('click', () => { S.selOp = k; S.multiSelect = false; hint(null); buildSubbar(); });
     seg.append(b);
   }
+  if (S.multiSelect) bar.append(chip('Multiselect', 'Done', () => { S.multiSelect = false; S.selOp = 'set'; hint(null); buildSubbar(); }, { on: true }));
   bar.append(seg, h('span', { class: 'vsep' }), chip('', '', () => openSettings(), { icon: 'sliders', aria: 'Settings' }));
 }
 
@@ -323,7 +324,7 @@ function buildShelf() {
       shelfBtn('Shading', 'smooth', () => menuSheet('Shading', [{ label: 'Shade Smooth', icon: 'smooth', run: () => opNormals('smooth') }, { label: 'Shade Flat', icon: 'cube', run: () => opNormals('flat') }, { group: 'Normals' }, { label: 'Recalculate Outside', icon: 'normals', run: () => opNormals('outside') }, { label: 'Flip Normals', icon: 'normals', run: () => opNormals('flip') }]), true),
       shelfBtn('Origin', 'origin', menuOrigin, true), shelfBtn('Apply', 'check', menuApply, true), shelfBtn('Mirror', 'mirror', menuMirror, true), shelfBtn('Snap', 'magnet', menuSnap, true),
       shelfBtn('Hide', 'hide', () => menuSheet('Visibility', [{ label: 'Hide Selected', icon: 'eyeoff', key: 'H', run: () => opHide('hide') }, { label: 'Reveal Hidden', icon: 'eye', key: 'Alt H', run: () => opHide('reveal') }]), true), g(),
-      shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
+      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Scene', 'layers', openOutliner), shelfBtn('Export', 'export', openExport),
     );
   } else {
     sh.append(
@@ -334,7 +335,7 @@ function buildShelf() {
       shelfBtn('Mesh', 'cube', menuMesh, true), g(),
       shelfBtn('UV', 'uv', menuUVFrom3D, true), shelfBtn('Seams', 'seam', () => menuSheet('UV Seams', [{ label: 'Mark Seam', icon: 'seam', desc: 'Selected edges become cuts for Unwrap', run: () => opSeam(true) }, { label: 'Clear Seam', icon: 'seam', run: () => opSeam(false) }]), true),
       shelfBtn('Snap', 'magnet', menuSnap, true), shelfBtn('Mirror', 'mirror', menuMirror, true), g(),
-      shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
+      shelfBtn('Modifiers', 'modifiers', openModifiers), shelfBtn('Material', 'material', openMaterialPanel), shelfBtn('Properties', 'sliders', openProps), shelfBtn('Object Mode', 'cube', () => setMode('object')),
     );
   }
   if (S.view === 'split') sh.append(g(), shelfBtn('UV Shelf', 'uv', () => { S.focus = 'uv'; buildShelf(); }));
@@ -492,8 +493,9 @@ function menuFile() {
     { label: 'Open Project…', icon: 'folder', desc: 'A .pocketmesh.json file', run: () => $('#fileProj').click() },
     { label: 'Save Project', icon: 'save', desc: 'Save to Files, iCloud Drive, AirDrop…', run: saveProjectFile },
     { group: 'Exchange' },
-    { label: 'Export Model…', icon: 'export', desc: 'OBJ · FBX · DAE · glTF', run: openExport },
-    { label: 'Import OBJ…', icon: 'import', run: () => $('#fileObj').click() },
+    { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
+    { label: 'Export as BRRES…', icon: 'export', desc: 'Wii model and textures', run: () => { settingsSet('export', { ...settingsGet('export', {}), fmt: 'brres', zip: false }); openExport(); } },
+    { label: 'Import OBJ + materials…', desc: 'Select OBJ, MTL and images together', icon: 'import', run: () => $('#fileObj').click() },
     { label: 'Export UV Layout (PNG)', icon: 'image', desc: 'Paint over it in another app', run: exportUVLayout },
     { group: 'Help' },
     { label: 'Gestures & Tips', icon: 'info', run: openHelp },
@@ -514,7 +516,8 @@ function confirmNew() {
 function newScene() {
   if (TF.active) tfCancel(); if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
-  S.objects = []; S.materials = []; S.images.clear(); S.mode = 'object'; S.active = null; S.uvSel = new Set();
+  clearImages(); S.multiSelect = false; S.selOp = 'set';
+  S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
   S.cursor.set(0, 0, 0);
   const mat = newMaterial('Material', '#c9ccd2');
   const o = createObject('Cube', primCube(), { materials: [mat.id] });
@@ -581,6 +584,42 @@ function buildOutliner(body) {
     body.append(row);
   }
 }
+function openModifiers() { openSheet('Modifiers', buildModifiers, { panel: true, kind: 'modifiers' }); }
+function changeModifiers(o, next, label) {
+  try {
+    evaluateModifiers(o.mesh, next); // Validate the allocation before changing state.
+    o.modifiers = normalizeModifiers(next);
+    rebuildObject(o); pushUndo(label); onSelectionChanged(); refreshSheet(true);
+  } catch (e) { toast(e.message, true); refreshSheet(true); }
+}
+function buildModifiers(body) {
+  const o = S.active;
+  if (!o) { body.append(h('p', { class: 'muted' }, 'Select an object to add a modifier.')); return; }
+  if (o.modifierError) body.append(h('p', { class: 'muted' }, o.modifierError + ' Showing the original mesh until you lower the level.'));
+  const m = o.modifiers[0];
+  if (!m) {
+    const add = h('button', { class: 'btn primary' }, h('span', { html: icon('plus') }), 'Add Subdivision Surface');
+    add.addEventListener('click', () => changeModifiers(o, [{ type: 'subdivision', levels: 1 }], 'Add Subdivision Surface'));
+    body.append(add);
+  } else {
+    const change = (key, value) => changeModifiers(o, [{ ...o.modifiers[0], [key]: value }], 'Subdivision Settings');
+    const card = h('div', { class: 'card' }, h('h3', {}, 'Subdivision Surface'),
+      field('Method', selectInput(m.method, [['catmull-clark', 'Catmull–Clark'], ['simple', 'Simple']], (v) => change('method', v), 'Subdivision method')),
+      field('Levels', selectInput(m.levels, [0, 1, 2, 3].map((v) => [v, String(v)]), (v) => change('levels', +v), 'Subdivision levels')),
+      checkInput('Enabled in Object Mode and exports', m.enabled, (v) => change('enabled', v)));
+    const apply = h('button', { class: 'btn primary', disabled: S.mode !== 'object' || !m.enabled }, 'Apply to mesh');
+    apply.addEventListener('click', () => {
+      try { const mesh = evaluateModifiers(o.mesh, o.modifiers); o.mesh = mesh; o.modifiers = []; o.esel = emptySel(); o.activeFace = -1; S.uvSel.clear(); rebuildObject(o); pushUndo('Apply Subdivision'); onSelectionChanged(); }
+      catch (e) { toast(e.message, true); }
+    });
+    const remove = h('button', { class: 'btn danger' }, 'Remove');
+    remove.addEventListener('click', () => changeModifiers(o, [], 'Remove Subdivision'));
+    card.append(h('div', { class: 'row' }, apply, remove));
+    body.append(card);
+  }
+  body.append(h('p', { class: 'muted' }, 'Edit Mode keeps the original control mesh. Object Mode and exports use the subdivided surface. Apply in Object Mode to edit the new vertices. UV seams and face materials are preserved.'));
+}
+
 function openMaterialPanel() { openSheet('Material', buildMaterialPanel, { panel: true, kind: 'material' }); }
 const PALETTE = ['#f2f2f2', '#c9ccd2', '#7d828c', '#2b2e35', '#d8402f', '#f08a24', '#f2c230', '#5fb346', '#2f9e8f', '#3b7dd8', '#7a4fd1', '#d14f9a', '#8a5a3b', '#e8c9a0'];
 function ensureMaterial(o) {
@@ -627,6 +666,9 @@ function buildMaterialPanel(body) {
     slots.append(h('div', { class: 'row' }, asg, sel));
   } else if (S.mode === 'object' && o.materials.length > 1) slots.append(h('p', { class: 'muted', style: { margin: 0 } }, 'To give faces different materials, go to Edit Mode, select faces, then tap “Assign”.'));
   body.append(slots);
+  const importMat = h('button', { class: 'btn' }, 'Import MTL + images…');
+  importMat.addEventListener('click', () => $('#fileMat').click());
+  body.append(importMat);
   // ---- which material + name
   if (mt) {
     const pick = selectInput(mt.id, [...S.materials.map((m) => [m.id, m.name]), ['__new', '+ New material']], (v) => {
@@ -675,6 +717,12 @@ function buildMaterialPanel(body) {
     if (im) {
       base.append(h('div', { class: 'texprev' + (mt.filter === 'nearest' ? ' px' : ''), style: { backgroundImage: `url(${im.thumbBig || (im.thumbBig = im.el.toDataURL('image/png'))})` } }),
         h('p', { class: 'muted', style: { margin: 0 } }, `${im.name} · ${im.width}×${im.height}`));
+      let maxSize = 512;
+      const size = selectInput(maxSize, [64, 128, 256, 512, 1024, 2048].map((n) => [n, n + ' px']), (v) => { maxSize = +v; }, 'Maximum image size');
+      const resize = h('button', { class: 'btn' }, 'Downscale image');
+      resize.addEventListener('click', () => { try { if (!downscaleMaterialImage(mt, maxSize)) toast('Image is already within that size'); } catch (e) { toast(e.message, true); } });
+      base.append(field('Longest side', size), resize, h('p', { class: 'muted' }, 'Keeps proportions and transparency. Creates a smaller copy for this material; Undo restores the original.'));
+
     }
     base.append(field('Interpolation', segButtons(mt.filter, [['linear', 'Linear'], ['nearest', 'Closest']], (v) => { mt.filter = v; live(); pushUndo('Interpolation'); refreshSheet(); })),
       field('Extension', segButtons(mt.wrap || 'repeat', [['repeat', 'Repeat'], ['extend', 'Extend']], (v) => { mt.wrap = v; live(); pushUndo('Texture Extension'); })),
@@ -696,6 +744,10 @@ function buildMaterialPanel(body) {
   // ---- surface
   if (mt) {
     body.append(h('div', { class: 'card' }, h('h3', {}, 'Surface'),
+      field('Shader', selectInput(mt.shader || 'lit', [['lit', 'Lit / PBR preview'], ['unlit', 'Unlit · Wii color/texture']], (v) => { mt.shader = v; live(); pushUndo('Shader'); }, 'Material shader')),
+      field('Transparency', selectInput(mt.alphaMode || 'auto', [['auto', 'Automatic'], ['opaque', 'Opaque'], ['cutout', 'Alpha cutout'], ['blend', 'Alpha blend']], (v) => { mt.alphaMode = v; live(); pushUndo('Transparency'); refreshSheet(true); }, 'Transparency mode')),
+      mt.alphaMode === 'cutout' ? field('Cutout threshold', sliderInput(mt.alphaCutoff ?? 0.5, 0, 1, 0.01, (v) => { mt.alphaCutoff = v; live(); }, () => pushUndo('Cutout Threshold'))) : null,
+      checkInput('Double sided', mt.doubleSided !== false, (v) => { mt.doubleSided = v; live(); pushUndo('Material Sides'); }),
       field('Roughness', sliderInput(mt.roughness, 0, 1, 0.01, (v) => { mt.roughness = v; refreshMaterials(); }, () => pushUndo('Roughness'))),
       field('Metallic', sliderInput(mt.metalness, 0, 1, 0.01, (v) => { mt.metalness = v; refreshMaterials(); }, () => pushUndo('Metallic'))),
       field('Alpha', sliderInput(mt.alpha, 0, 1, 0.01, (v) => { mt.alpha = v; refreshMaterials(); }, () => pushUndo('Alpha'))),
@@ -732,17 +784,37 @@ $('#fileProj').addEventListener('change', async (e) => {
   catch (err) { toast(err.message || 'Could not open that file', true); }
 });
 $('#fileObj').addEventListener('change', async (e) => {
-  const f = e.target.files && e.target.files[0];
-  e.target.value = '';
-  if (!f) return;
+  const files = [...(e.target.files || [])]; e.target.value = '';
+  if (!files.length) return;
+  const before = snapshot(), history = UNDO.stack.slice(), historyIndex = UNDO.idx;
   try {
-    if (!/\.obj$/i.test(f.name)) throw new Error('Choose a .obj file');
+    const objs = files.filter((f) => /\.obj$/i.test(f.name));
+    if (!objs.length) throw new Error('Select an OBJ, with optional MTL and image files');
     if (S.mode === 'edit') setMode('object');
-    const n = importOBJText(await f.text(), f.name);
-    pushUndo('Import OBJ'); onSelectionChanged(); frameSelected();
-    toast(`Imported ${n} object${n > 1 ? 's' : ''}`);
-  } catch (err) { toast(err.message || 'Could not read that OBJ', true); }
+    let count = 0;
+    for (const f of objs) count += importOBJText(await f.text(), f.name);
+    const materials = await importMaterialFiles(files);
+    pushUndo('Import OBJ + Materials'); onSelectionChanged(); frameSelected();
+    showImportResult(count + ' object(s), ' + materials.count + ' material(s)', materials.warnings);
+  } catch (err) { UNDO.stack = history; UNDO.idx = historyIndex; restore(before); onHistoryChanged(); toast(err.message || 'Could not import', true); }
 });
+$('#fileMat').addEventListener('change', async (e) => {
+  const files = [...(e.target.files || [])]; e.target.value = '';
+  if (!files.length) return;
+  const before = snapshot();
+  try {
+    if (!files.some((f) => /\.mtl$/i.test(f.name))) throw new Error('Select an MTL and its image files together');
+    const result = await importMaterialFiles(files);
+    pushUndo('Import Materials'); onSelectionChanged();
+    showImportResult(result.count + ' material(s)', result.warnings);
+  } catch (e) { restore(before); toast(e.message, true); }
+});
+function showImportResult(summary, warnings) {
+  if (!warnings.length) { toast('Imported ' + summary); return; }
+  openSheet('Import results', (body) => {
+    body.append(h('p', {}, 'Imported ' + summary), ...warnings.map((w) => h('p', { class: 'muted' }, w)));
+  });
+}
 function exportUVLayout() {
   if (!S.active || !S.active.mesh.faces.length) { toast('Select an object with faces', true); return; }
   const c = uvLayoutCanvas(settingsGet('uvLayoutSize', 1024));
@@ -755,29 +827,34 @@ function buildExport(body) {
   if (st.selectedOnly === undefined) st.selectedOnly = anySel;
   const save = () => settingsSet('export', st);
   const notes = {
+    brres: 'Wii model + textures (course, MDL0 v11). For RiiStudio, BrawlCrate and noclip. A playable track also needs KCL collision, KMP race data and an SZS package.',
     obj: 'Wavefront OBJ + MTL. Comes as a .zip with its textures; tap the zip in Files to unpack it.',
     fbx: 'Binary FBX 7.4 with textures embedded. Opens in Blender, Unity, Unreal, Maya.',
     dae: 'COLLADA 1.4.1. Comes as a .zip with its textures when it has any.',
     glb: 'glTF 2.0 binary, everything in one file. Best for web, AR Quick Look tools, Godot.',
     gltf: 'glTF 2.0 text file with embedded data.',
   };
-  const fmts = [['obj', 'OBJ'], ['fbx', 'FBX'], ['dae', 'DAE'], ['glb', 'GLB'], ['gltf', 'glTF']];
+  const fmts = [['brres', 'BRRES'], ['obj', 'OBJ'], ['fbx', 'FBX'], ['dae', 'DAE'], ['glb', 'GLB'], ['gltf', 'glTF']];
   const card = h('div', { class: 'card' }, h('h3', {}, 'Format'), segButtons(st.fmt, fmts, (v) => { st.fmt = v; save(); refreshSheet(); }), h('p', { class: 'muted', style: { margin: 0 } }, notes[st.fmt]));
   const nameIn = h('input', { type: 'text', 'aria-label': 'File name', autocomplete: 'off', autocorrect: 'off', spellcheck: 'false' });
-  nameIn.value = settingsGet('exportName', (S.active && S.active.name) || 'model');
-  nameIn.addEventListener('change', () => settingsSet('exportName', nameIn.value));
+  nameIn.value = st.fmt === 'brres' ? settingsGet('brresName', 'course_model') : settingsGet('exportName', (S.active && S.active.name) || 'model');
+  nameIn.addEventListener('change', () => settingsSet(st.fmt === 'brres' ? 'brresName' : 'exportName', nameIn.value));
   nameIn.addEventListener('keydown', (e) => e.stopPropagation());
   const opts = h('div', { class: 'card' }, h('h3', {}, 'Options'), field('File name', nameIn),
     checkInput(`Selected objects only${anySel ? '' : ' (nothing selected)'}`, st.selectedOnly && anySel, (v) => { st.selectedOnly = v; save(); }),
-    checkInput('Apply object transforms', st.applyTransforms, (v) => { st.applyTransforms = v; save(); }),
-    checkInput('Triangulate faces', st.triangulate || st.fmt === 'glb' || st.fmt === 'gltf', (v) => { st.triangulate = v; save(); }),
-    st.fmt === 'glb' || st.fmt === 'gltf' ? null : checkInput('Y axis up (most apps expect this)', st.yUp, (v) => { st.yUp = v; save(); }),
+    st.fmt === 'brres' ? null : checkInput('Apply object transforms', st.applyTransforms, (v) => { st.applyTransforms = v; save(); }),
+    st.fmt === 'brres' ? null : checkInput('Triangulate faces', st.triangulate || st.fmt === 'glb' || st.fmt === 'gltf', (v) => { st.triangulate = v; save(); }),
+    st.fmt === 'brres' || st.fmt === 'glb' || st.fmt === 'gltf' ? null : checkInput('Y axis up (most apps expect this)', st.yUp, (v) => { st.yUp = v; save(); }),
     checkInput('Always wrap in a .zip', st.zip, (v) => { st.zip = v; save(); }));
-  const go = h('button', { class: 'btn primary', style: { height: '46px', fontSize: '17px', justifyContent: 'center' } }, h('span', { html: icon('export') }), 'Export & Save…');
+  if (st.fmt === 'brres') opts.append(
+    field('Wii units per model unit', numInput(st.scale ?? 1, (v) => { st.scale = v; save(); }, { min: 0.001, max: 100000 })),
+    field('Maximum texture size', selectInput(st.textureSize || 512, [64, 128, 256, 512, 1024].map((v) => [v, v + ' px']), (v) => { st.textureSize = +v; save(); }, 'BRRES texture size')),
+    h('p', { class: 'muted' }, 'Exports evaluated modifiers, applies transforms and converts Z-up to Wii Y-up. Textures are resized to power-of-two dimensions and embedded as RGBA8. Basic unlit color/texture, cutout and alpha blend are supported; PBR lighting and metallic effects are not exported.'));
+  const go = h('button', { class: 'btn primary', style: { height: '46px', fontSize: '17px', justifyContent: 'center' } }, h('span', { html: icon('export') }), st.fmt === 'brres' ? 'Export & Send BRRES…' : 'Export & Save…');
   go.addEventListener('click', () => {
     try {
       const base = safeFileName(nameIn.value, 'model');
-      const r = runExport(st.fmt, { selectedOnly: st.selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base });
+      const r = runExport(st.fmt, { selectedOnly: st.selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
       shareOrDownload(r.name, r.data);
       const kb = (r.data.length || r.data.byteLength || 0) / 1024;
       $('#exportInfo').textContent = `${r.name} · ${kb > 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(kb)) + ' KB'}${r.count > 1 ? ` · ${r.count} files inside` : ''}`;
@@ -835,6 +912,8 @@ function openHelp() {
       tip('Double-tap an edge', 'selects its whole edge loop.'),
       tip('Set / Add / Sub', 'controls whether taps and box selections replace, add to or remove from the selection.'),
       tip('Adjust Last Operation', 'appears bottom-left after adding shapes or using tools: change segments, cuts, margins and more.'),
+      tip('Multiselect', 'Hold a vertex, edge, face or object for a moment, then tap to add or remove more. Tap Done in the top bar to finish.'),
+      tip('Modifiers', 'The wrench opens Subdivision Surface. Edit the control mesh in Edit Mode; preview and export the smooth result in Object Mode.'),
       tip('Textures', 'Material → Choose image, then UV → Unwrap. Use the UV view (top-right button) to straighten and pack.'),
       tip('UV view', 'pinch to zoom, twist to rotate the view (clicks to 0/90/180/270°). The UV Rotate tool clicks to the same angles.'),
       tip('Keyboard', 'works too: Tab, G R S, X Y Z, E, I, Ctrl R, A, F, M, U, Shift A, Shift D, Ctrl Z.'),
@@ -888,11 +967,34 @@ setSelectMode = function (m) { _origSetSelectMode(m); onModeChanged(); };
 
 // ---------- 3D viewport gestures ----------
 const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastTap: null };
+function cancelHold() { clearTimeout(G.holdTimer); G.holdTimer = null; }
+function beginHold(e, p) {
+  cancelHold();
+  if (e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+  const object = S.active, mode = S.mode, selectMode = S.selectMode;
+  G.holdTimer = setTimeout(() => {
+    if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+    const el = S.mode === 'edit' && S.active ? pickElement(p.x, p.y, e.pointerType === 'mouse' ? 14 : 28) : null;
+    const ob = S.mode === 'object' ? pickObject(p.x, p.y) : null;
+    if (!el && !ob) return;
+    S.selOp = 'add'; S.multiSelect = true;
+    if (el) {
+      // A hold always adds its target; subsequent taps toggle it.
+      const selected = el.type === 'vert' ? object.esel.verts.has(el.i) : el.type === 'edge' ? object.esel.edges.has(el.key) : object.esel.faces.has(el.i);
+      if (!selected) toggleInSel(el, 'add');
+    } else { ob.selected = true; S.active = ob; }
+    G.mode = 'held'; G.lastTap = null;
+    buildSubbar(); onSelectionChanged();
+    hint('Multiselect · tap to add/remove · Done to finish');
+    if (navigator.vibrate) navigator.vibrate(15);
+  }, 450);
+}
 function rel(e, el = c3d) { const r = el.getBoundingClientRect(); return { x: e.clientX - r.left, y: e.clientY - r.top }; }
 function twoInfo() { const [a, b] = [...G.p.values()]; return { mx: (a.x + b.x) / 2, my: (a.y + b.y) / 2, d: Math.hypot(a.x - b.x, a.y - b.y), ang: Math.atan2(b.y - a.y, b.x - a.x) }; }
 function twistView(dth) { CAM.anim = null; CAM.yaw += CAM.pitch < -0.01 ? -dth : dth; CAM.viewName = null; applyCamera(); }
 c3d.addEventListener('contextmenu', (e) => e.preventDefault());
 c3d.addEventListener('pointerdown', (e) => {
+  cancelHold();
   S.focus = '3d';
   if (S.view === 'split' && $('#shelf').dataset.focus !== '3d') { $('#shelf').dataset.focus = '3d'; buildShelf(); }
   if (tc.enabled && (tc.dragging || tc.axis)) return;
@@ -906,6 +1008,7 @@ c3d.addEventListener('pointerdown', (e) => {
     if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
+    if (G.mode === 'pending') beginHold(e, p);
   } else if (G.p.size === 2) {
     if (G.mode === 'box') { $('#boxrect').hidden = true; }
     G.mode = 'two'; G.two = twoInfo(); G.twist = 0; G.twisting = false;
@@ -926,6 +1029,7 @@ c3d.addEventListener('pointermove', (e) => {
   const dx = p.x - pt.x, dy = p.y - pt.y;
   pt.x = p.x; pt.y = p.y;
   if (Math.hypot(p.x - pt.x0, p.y - pt.y0) > (e.pointerType === 'mouse' ? 4 : 9)) G.moved = true;
+  if (G.moved) cancelHold();
   if (G.mode === 'two' && G.p.size === 2) {
     const t = twoInfo();
     let dth = Math.atan2(Math.sin(t.ang - G.two.ang), Math.cos(t.ang - G.two.ang));
@@ -966,6 +1070,7 @@ c3d.addEventListener('pointermove', (e) => {
   }
 });
 function endPointer(e) {
+  cancelHold();
   if (!G.p.has(e.pointerId)) return;
   const pt = G.p.get(e.pointerId);
   G.p.delete(e.pointerId);
@@ -983,6 +1088,10 @@ function endPointer(e) {
 }
 c3d.addEventListener('pointerup', endPointer);
 c3d.addEventListener('pointercancel', endPointer);
+c3d.addEventListener('lostpointercapture', endPointer);
+function cancelViewportGesture() { cancelHold(); G.p.clear(); G.mode = null; $('#boxrect').hidden = true; }
+window.addEventListener('blur', cancelViewportGesture);
+document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
 c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('gesturechange', (e) => e.preventDefault());
@@ -994,7 +1103,7 @@ function handleTap(x, y, ptype) {
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
   if (S.tool === 'cursor') { placeCursor(x, y); return; }
   const now = performance.now();
-  const dbl = G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
+  const dbl = !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
   G.lastTap = { t: now, x, y };
   if (S.mode === 'edit' && S.active) {
     if (dbl && S.selectMode !== 'vert') { G.lastTap = null; loopSelectAt(x, y, 'loop', S.selOp === 'sub' ? 'sub' : 'add'); return; }
@@ -1232,7 +1341,7 @@ async function boot() {
   window.addEventListener('resize', () => { requestRender(); uvRequest(); });
   c3d.addEventListener('webglcontextlost', (e) => { e.preventDefault(); }, false);
   c3d.addEventListener('webglcontextrestored', () => {
-    for (const im of S.images.values()) if (im.tex) im.tex.needsUpdate = true;
+    for (const im of S.images.values()) for (const tex of im.textures?.values() || []) tex.needsUpdate = true;
     envTex = null; applyShadingEnv();
     for (const o of S.objects) rebuildObject(o);
     refreshAllObjects(); requestRender();
@@ -1249,7 +1358,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { S, CAM, UNDO, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { S, CAM, UNDO, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

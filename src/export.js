@@ -314,7 +314,7 @@ function _exNormTexture(t) {
   const name = _exCleanName(t.name, 'texture.png');
   let mime = t.mime;
   if (mime !== 'image/png' && mime !== 'image/jpeg') mime = /\.jpe?g$/i.test(name) ? 'image/jpeg' : 'image/png';
-  return { name, mime, bytes, filter: t.filter === 'nearest' ? 'nearest' : 'linear', width: t.width | 0, height: t.height | 0 };
+  return { name, mime, bytes, rgba: t.rgba, filter: t.filter === 'nearest' ? 'nearest' : 'linear', width: t.width | 0, height: t.height | 0 };
 }
 
 // Id of a value in `list`, deduplicated with nested numeric Maps (no float->string keys).
@@ -364,6 +364,8 @@ function _exPrepare(scene, o) {
       roughness: s && s.roughness != null ? _exClamp01(s.roughness) : 0.5,
       metalness: s && s.metalness != null ? _exClamp01(s.metalness) : 0,
       texture: tex,
+      alphaMode: s?.alphaMode || 'auto', alphaCutoff: s?.alphaCutoff == null ? 0.5 : _exClamp01(s.alphaCutoff), doubleSided: s?.doubleSided !== false, wrap: s?.wrap || 'repeat',
+      filter: s?.texture?.filter === 'nearest' ? 'nearest' : 'linear',
       index: materials.length,
     };
     materials.push(m);
