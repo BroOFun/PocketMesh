@@ -99,14 +99,23 @@ them exactly vertical. Both keep spacing along that UV axis and leave unselected
 UVs unchanged. Plain **Straighten** follows the direction between the endpoints.
 
 In **Edit Mode**, choose **Knife** in the left sidebar (keyboard: **K**). Tap a
-vertex or edge to start, then another vertex or edge to preview a cut across the
-visible faces. Nearby vertices magnetize automatically and show a green ring.
+face, vertex or edge to start, then another point to preview a cut across the
+visible faces. Face interiors show a blue ring; edge snaps show amber. Nearby vertices magnetize automatically and show a green ring.
 Keep tapping to continue, or choose **New cut** for a separate stroke. **Apply**
 (Enter) commits the cuts as one undoable operation; **Cancel** (Escape) discards
 them. **Undo cut** (Backspace) removes the last preview segment. Drag to orbit or
 use two fingers to navigate. Materials, UV seams and creases survive the cuts.
-This first version uses boundary endpoints and cuts visible surfaces; it does
-not start/end inside a face or cut through hidden surfaces.
+Cuts can start and end inside faces, including n-gons. Interior endpoints add
+supporting triangles so the cut is part of the surface. Hidden surfaces are
+left untouched.
+
+Select faces and choose **Inset** in the left sidebar (keyboard: **I**, also in
+**Mesh → Inset Faces**). Drag horizontally or type a thickness, then tap **Done**.
+**Individual** insets each selected face separately; otherwise they inset as a
+region. Convex and concave n-gons retain an inner n-gon, with texture coordinates
+interpolated from the original surface. Single-face/individual insets stop before
+the boundary overlaps. **Cancel** restores the mesh and selection; confirmed
+insets support undo/redo and the existing depth adjustment.
 
 The **Extrude** tool has **Quick drag** enabled by default: drag from a selected
 vertex, edge, or face, and release to finish. The new geometry stays selected so

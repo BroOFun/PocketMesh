@@ -64,6 +64,47 @@ assert.equal(cut(plane, [-1,-1], [1,-1]), null, 'Existing boundary is not duplic
 assert.equal(cut(plane, [-1,-1], [-1,-1]), null);
 assert.equal(cut(plane, [-3,0], [-2,0]), null);
 assert.equal(cut(plane, [-2,0], [0,2]), null, 'Tangent vertex does not create a face');
-assert.equal(cut(plane, [0,0], [.5,.5]), null, 'Interior-only stroke fails without mutations');
+// Interior endpoints create real surface vertices, including on hidden render
+// diagonals. Their new edges are shared by two faces, never floating wires.
+for (const [a,b] of [[[0,0],[.5,.5]], [[-.6,.2],[.5,-.3]], [[-1,0],[.3,.2]], [[-.2,.1],[1,1]]]) {
+  const r = cut(plane,a,b); assert.ok(r); valid(r.mesh);
+  const topology = topo(r.mesh);
+  for (const key of r.edges) assert.equal(topology.edgeFaces[topology.edgeIndex.get(key)].length, 2);
+  assert.equal(topology.edgeFaces.filter(fs=>fs.length===1).length, a[0]===-1 && a[1]===0 ? 5 : 4);
+  for (const f of r.mesh.faces) f.v.forEach((v,i)=>{
+    assert.ok(Math.abs(f.uv[i][0]-(r.mesh.verts[v][0]+1)/2)<1e-10);
+    assert.ok(Math.abs(f.uv[i][1]-(r.mesh.verts[v][1]+1)/2)<1e-10);
+  });
+}
+const insideGrid = cut(grid, [-.8,.2], [.8,.2]); valid(insideGrid.mesh);
+for (const key of insideGrid.mesh.seams) assert.equal(topo(insideGrid.mesh).edgeFaces[topo(insideGrid.mesh).edgeIndex.get(key)].length,2);
+const insideConcave = cut(concave, [.3,.4], [2.7,2.4]); valid(insideConcave.mesh,7);
+assert.ok(insideConcave.mesh.faces.every(f=>f.mat===7));
+const fromInside = cut(plane, [-.4,.2], [.4,.2]);
+const continuing = cut(fromInside.mesh, [.4,.2], [.1,-.4]); valid(continuing.mesh);
+const crossingInside = cut(continuing.mesh, [0,-.7], [0,.7]); valid(crossingInside.mesh);
+assert.equal(cut(plane, [0,0], [.5,.5], ()=>false),null, 'Hidden face interiors remain untouched');
+const perspInside = knifeCutProjected(tilted, perspective, {x:-10,y:3}, {x:15,y:10});
+assert.ok(perspInside);
+for (const f of perspInside.mesh.faces) f.v.forEach((v,i)=>assert.ok(Math.abs(f.uv[i][0]-(perspInside.mesh.verts[v][0]+1)/2)<1e-10));
+// A closed face-interior path and repeated arbitrary strokes retain full area
+// and a manifold surface, even when they cross supporting triangles.
+let loops=plane;
+for (const [a,b] of [[[-.5,-.5],[.5,-.5]], [[.5,-.5],[.5,.5]], [[.5,.5],[-.5,.5]], [[-.5,.5],[-.5,-.5]]]) {
+  const r=cut(loops,a,b); assert.ok(r); loops=r.mesh; valid(loops);
+  assert.ok(topo(loops).edgeFaces.every(fs=>fs.length<=2));
+}
+let seed=42;
+const rand=()=>((seed=(1664525*seed+1013904223)>>>0)/2**32)*1.8-.9;
+for(let i=0;i<40;i++) {
+  const a=[rand(),rand()], b=[rand(),rand()], r=cut(plane,a,b); assert.ok(r); valid(r.mesh);
+  const total=[...r.edges].reduce((s,key)=>{
+    const [a,b]=key.split('_').map(Number), p=r.mesh.verts[a], q=r.mesh.verts[b];
+    return s+Math.hypot(p[0]-q[0],p[1]-q[1]);
+  },0);
+  assert.ok(Math.abs(total-Math.hypot(a[0]-b[0],a[1]-b[1]))<1e-9,'Cut covers exactly the requested stroke');
+}
+const reverseInterior = cut(reverse,[0,0],[.4,.2]).mesh;
+assert.ok(reverseInterior.faces.every(f=>faceNormal(reverseInterior,f)[2]<-.999));
 assert.deepEqual(plane, before);
-console.log('Knife: vertex reuse, edge/cross-face cuts, shared topology, materials, UV seams, creases, perspective, concavity, winding and atomic no-ops passed');
+console.log('Knife: vertex reuse, face-interior/edge/cross-face cuts, shared topology, materials, UV seams, creases, perspective, concavity, winding and atomic no-ops passed');

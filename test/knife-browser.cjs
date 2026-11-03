@@ -24,7 +24,8 @@ const {chromium, devices} = require('playwright');
       const load = async (kind = 'plane') => {
         await page.evaluate(async ({kind, layout}) => {
           const p = __pm, d = p.serializeProject(); d.objects = d.objects.slice(0,1);
-          const mesh = kind === 'cube' ? p.primCube() : {verts: [[-1,-1,0],[1,-1,0],[1,1,0],[-1,1,0]], faces: [{v: [0,1,2,3], uv: [[0,0],[1,0],[1,1],[0,1]], mat: 0}], looseEdges: [], seams: [], creases: []};
+          const ngon = [[-1,-1,0],[1,-1,0],[1,0,0],[0,0,0],[0,1,0],[-1,1,0]];
+          const mesh = kind === 'ngon' ? {verts: ngon, faces: [{v: [0,1,2,3,4,5], uv: ngon.map(([x,y])=>[(x+1)/2,(y+1)/2]), mat: 0}], looseEdges: [], seams: [], creases: []} : kind === 'cube' ? p.primCube() : {verts: [[-1,-1,0],[1,-1,0],[1,1,0],[-1,1,0]], faces: [{v: [0,1,2,3], uv: [[0,0],[1,0],[1,1],[0,1]], mat: 0}], looseEdges: [], seams: [], creases: []};
           d.objects[0].mesh = {...mesh, seams: [...mesh.seams], creases: [...mesh.creases]};
           d.objects[0].selected = true; d.objects[0].pos = [0,0,0]; d.objects[0].quat = [0,0,0,1]; d.objects[0].scl = [1,1,1];
           d.camera = {target: [0,0,0], yaw: 0, pitch: Math.PI / 2, dist: layout === 'landscape' ? 3.7 : 6, ortho: true};
@@ -71,6 +72,22 @@ const {chromium, devices} = require('playwright');
       await tap([0,1,0]); await apply();
       assert.equal((await state()).faces.length, 4); assert.equal((await state()).verts.length, 9);
       await page.locator('#btnUndo').click(); assert.deepEqual(await state(), initial);
+      // Face selection mode also accepts points in the middle of faces.
+      await page.evaluate(()=>__pm.setSelectMode('face'));
+      await start(); await tap([-.4,.25,0]);
+      assert.equal(await page.evaluate(()=>__pm.KNIFE.first.kind),'Face');
+      await tap([.45,-.3,0]);
+      assert.ok(await page.evaluate(()=>__pm.KNIFE.edges.size>0));
+      assert.deepEqual(await state(),initial);
+      await page.screenshot({path:`work/face-knife-${layout}.png`,animations:'disabled'});
+      await page.getByRole('button',{name:'Undo cut',exact:true}).click();
+      assert.equal(await page.evaluate(()=>__pm.KNIFE.mesh.faces.length),1);
+      await tap([.45,-.3,0]); await apply();
+      const interior=await state(); assert.ok(interior.verts.length>=6);
+      assert.ok(interior.faces.length>1);
+      await page.locator('#btnUndo').click(); assert.deepEqual(await state(),initial);
+      await page.locator('#btnRedo').click(); assert.deepEqual(await state(),interior);
+      await page.locator('#btnUndo').click();
       // Switching tool/editor or pressing Escape discards a pending knife cut.
       await start(); await tap([-1,-1,0]); await tap([1,1,0]);
       await page.getByRole('button', {name: 'Move gizmo', exact: true}).click(); assert.deepEqual(await state(), initial);
@@ -99,8 +116,48 @@ const {chromium, devices} = require('playwright');
       assert.equal(await page.evaluate(() => __pm.KNIFE.first), null);
       await page.keyboard.press('Tab');
       assert.equal(await page.getByRole('button', {name: 'Knife tool · K', exact: true}).count(), 0);
+      // Inset is accessible in the sidebar, preserves a concave n-gon and
+      // rolls back both geometry and selection on Cancel.
+      await load('ngon');
+      await page.evaluate(()=>{__pm.setSelectMode('face'); __pm.editSelectAll('select'); __pm.pushUndo('Select n-gon');});
+      const ngon=await state();
+      const selection=()=>page.evaluate(()=>Object.fromEntries(Object.entries(__pm.S.active.esel).map(([k,v])=>[k,[...v]])));
+      const selected=await selection();
+      const inset=()=>page.getByRole('button',{name:'Inset faces · I',exact:true}).click();
+      await inset(); assert.deepEqual(await state(),ngon,'Opening Inset changes no topology');
+      assert.equal(await page.locator('#pmNum').count(),1,JSON.stringify({errors,selected,ui:await page.locator('#tfbar').innerHTML(),tool:await page.evaluate(()=>__pm.S.tool)}));
+      await page.getByRole('textbox',{name:'Inset value',exact:true}).fill('.15');
+      const insetPreview=await state(); assert.equal(insetPreview.faces.length,7); assert.equal(insetPreview.faces[0].v.length,6);
+      await page.locator('#tfbar').getByRole('button',{name:'Cancel',exact:true}).click();
+      assert.deepEqual(await state(),ngon); assert.deepEqual(await selection(),selected);
+      await inset(); await page.getByRole('textbox',{name:'Inset value',exact:true}).fill('.15');
+      await page.locator('#tfbar').getByRole('button',{name:'Done',exact:true}).click();
+      assert.deepEqual(await state(),insetPreview);
+      await page.locator('#btnUndo').click(); assert.deepEqual(await state(),ngon);
+      await page.locator('#btnRedo').click(); assert.deepEqual(await state(),insetPreview);
+      await page.screenshot({path:`work/inset-ngon-${layout}.png`,animations:'disabled'});
+      await page.locator('#btnUndo').click();
+      await page.keyboard.press('i'); await page.getByRole('textbox',{name:'Inset value',exact:true}).fill('100');
+      const limited=await state(); assert.ok(limited.verts.every(v=>v.every(Number.isFinite)));
+      assert.ok(await page.evaluate(()=>__pm.S.active.mesh.faces.every(f=>__pm.faceNormal(__pm.S.active.mesh,f)[2]>.99)));
+      await page.keyboard.press('Escape'); assert.deepEqual(await state(),ngon);
+      // Horizontal touch/mouse drag drives the same inset preview.
+      await inset(); const drag=await point([.2,.2,0]);
+      if(mobile) {
+        const session=await ctx.newCDPSession(page);
+        await session.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:drag.x,y:drag.y}]});
+        await session.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:drag.x+35,y:drag.y}]});
+        await session.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+        await session.detach();
+      } else {
+        await page.mouse.move(drag.x,drag.y); await page.mouse.down(); await page.mouse.move(drag.x+35,drag.y,{steps:4}); await page.mouse.up();
+      }
+      assert.ok(Number(await page.locator('#pmNum').inputValue())>0);
+      await page.locator('#tfbar').getByRole('button',{name:'Individual',exact:true}).click();
+      await page.locator('#tfbar').getByRole('button',{name:'Done',exact:true}).click();
+      assert.equal((await state()).faces[0].v.length,6);
       assert.deepEqual(errors, []);
-      console.log(`${layout}: vertex magnets, edge/crossing cuts, preview/cancel/save isolation, apply/undo/redo, keyboard, pane/tool switches, occlusion and orbit passed`);
+      console.log(`${layout}: vertex magnets, edge/crossing cuts, preview/cancel/save isolation, apply/undo/redo, keyboard, pane/tool switches, occlusion, orbit, face-interior cuts and concave n-gon inset/cancel/undo/redo/drag passed`);
       await ctx.close();
     }
   } finally {await browser.close(); server.close();}

@@ -205,12 +205,22 @@ function opDuplicate() {
 
 // ---------- inset ----------
 function opInset() {
+  finishEditorInteraction();
   if (!needSel('faces')) return;
+  closeSheet(); S.tool = 'select'; S.pendingTap = null; rulerResetPending();
+  buildTools(); buildSubbar(); gizmoSync();
   const o = S.active;
   const faces = new Set(osel().faces);
   const base = cloneMesh(o.mesh);
+  const selection = {verts: new Set(o.esel.verts), edges: new Set(o.esel.edges), faces: new Set(o.esel.faces)};
+  const activeFace = o.activeFace, uvSel = new Set(S.uvSel);
   const params = { thickness: 0, depth: 0, individual: false };
-  const run = () => { o.mesh = cloneMesh(base); const r = inset(o.mesh, faces, params.thickness, params.depth, params.individual); setSelFaces(r.faces); rebuildObject(o); };
+  const run = () => {
+    o.mesh = cloneMesh(base);
+    const r = inset(o.mesh, faces, params.thickness, params.depth, params.individual);
+    S.uvSel.clear(); setSelFaces(r.faces); rebuildObject(o);
+    hint(r.clamped ? 'Inset limited to prevent overlap · reduce the thickness for a wider center' : 'Drag right to inset · Individual toggles per-face');
+  };
   const center = new THREE.Vector3(...faceCenter(o.mesh, o.mesh.faces[[...faces][0]])).applyMatrix4(o.node.matrixWorld);
   paramModal({
     label: 'Inset', value: 0, min: 0, max: 1000, perPixel: worldPerPixel(center) * 0.6, undoLabel: 'Inset Faces',
@@ -221,7 +231,7 @@ function opInset() {
       b.addEventListener('click', () => { params.individual = !params.individual; b.classList.toggle('on', params.individual); run(); });
       return [b];
     },
-    onCancel: () => { o.mesh = base; rebuildObject(o); },
+    onCancel: () => { o.mesh = base; o.esel = selection; o.activeFace = activeFace; S.uvSel = uvSel; rebuildObject(o); },
     onConfirm: () => {
       setTimeout(() => setLastOp('Inset Faces', params, [
         { k: 'thickness', label: 'Thickness', def: 0.1, min: 0, step: 0.01 },

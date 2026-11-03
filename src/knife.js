@@ -1,5 +1,5 @@
-// Screen-space knife segments, with perspective-correct edge splits. Endpoints
-// are on mesh boundaries; visibility is supplied by the viewport. Pure/atomic:
+// Screen-space knife segments, with perspective-correct face/edge splits.
+// Visibility is supplied by the viewport. Pure/atomic:
 // the input mesh is never changed, including when a cut cannot be made.
 const _knCross = (a, b) => a[0] * b[1] - a[1] * b[0];
 function _knInside(p, poly) {
@@ -13,7 +13,67 @@ function _knInside(p, poly) {
   }
   return inside;
 }
+// Barycentric coordinates in screen space, then perspective-correct weights.
+function _knWeights(poly, p) {
+  const [a, b, c] = poly, den = _knCross([b.x-a.x, b.y-a.y], [c.x-a.x, c.y-a.y]);
+  if (Math.abs(den) < 1e-12) return null;
+  const v = _knCross([p.x-a.x, p.y-a.y], [c.x-a.x, c.y-a.y]) / den;
+  const w = _knCross([b.x-a.x, b.y-a.y], [p.x-a.x, p.y-a.y]) / den;
+  const weights = [1-v-w, v, w];
+  if (weights.some(t => t < -1e-8)) return null;
+  const corrected = weights.map((t, i) => Math.max(0, t) / poly[i].w), sum = corrected.reduce((a,b) => a+b, 0);
+  return {weights: corrected.map(t => t / sum), w: 1 / sum};
+}
 export function knifeCutProjected(mesh, projected, from, to, visible = () => true) {
+  const dx = to.x-from.x, dy = to.y-from.y, length = Math.hypot(dx, dy);
+  if (!Number.isFinite(length) || length < 1e-5) return null;
+  const prepared = cloneMesh(mesh), screen = projected.slice(), origins = [];
+  prepared.faces = mesh.faces.flatMap((face, fi) => {
+    const poly = face.v.map(v => screen[v]);
+    const endpoints = poly.every(p => p?.valid && p.w > 0) ? [from, to].filter(p => _knInside(p, poly)) : [];
+    let parts = [{...face, v: face.v.slice(), uv: face.uv.map(uv => uv.slice())}], changed = false;
+    for (const p of endpoints) {
+      const triangles = changed ? parts : triangulateFace(mesh, face).map(corners => ({...face, v: corners.map(i => face.v[i]), uv: corners.map(i => face.uv[i].slice())}));
+      const hits = triangles.map(f => _knWeights(f.v.map(v => screen[v]), p));
+      const idx = hits.findIndex(Boolean);
+      if (idx < 0) continue;
+      const hit = hits[idx], f = triangles[idx];
+      const point = [0,1,2].map(k => hit.weights.reduce((sum, t, i) => sum + t * prepared.verts[f.v[i]][k], 0));
+      if (!visible(fi, point, point)) continue;
+      // The second endpoint can already coincide with a vertex inserted above.
+      if (hit.weights.some(t => t > 1 - 1e-10)) continue;
+      const nv = prepared.verts.length;
+      prepared.verts.push(point); screen.push({...p, w: hit.w, valid: true});
+      parts = triangles.flatMap((f, i) => {
+        const h = hits[i]; if (!h) return [f];
+        const uv = [0,1].map(k => h.weights.reduce((sum, t, j) => sum + t * f.uv[j][k], 0));
+        // If the point lies on a triangulation edge, split BOTH sides. Skip
+        // the zero-area fan wedge, retaining a welded surface with no T-junction.
+        return f.v.flatMap((v, j) => h.weights[(j+2)%3] > 1e-10 ? [{...f, v: [v, f.v[(j+1)%3], nv], uv: [f.uv[j].slice(), f.uv[(j+1)%3].slice(), uv.slice()]}] : []);
+      });
+      changed = true;
+    }
+    origins.push(...parts.map(() => fi));
+    return parts;
+  });
+  // A stroke may coincide with an edge introduced by the endpoint fan. Such
+  // edges already ARE the cut; the boundary splitter must not duplicate them.
+  const aligned = new Set();
+  topo(prepared).edges.forEach(([a,b], ei) => {
+    const onSegment = v => {
+      const p = screen[v];
+      if (!p?.valid || !(p.w > 0)) return false;
+      const t = ((p.x-from.x)*dx+(p.y-from.y)*dy)/(length*length);
+      return t >= -1e-8 && t <= 1+1e-8 && Math.abs((p.x-from.x)*dy-(p.y-from.y)*dx)/length < 1e-6;
+    };
+    const key = ekey(a,b);
+    if (topo(prepared).edgeFaces[ei].length === 2 && onSegment(a) && onSegment(b) && topo(prepared).edgeFaces[ei].some(fi => visible(origins[fi], prepared.verts[a], prepared.verts[b]))) aligned.add(key);
+  });
+  const result = _knifeCutBoundaries(prepared, screen, from, to, (fi,a,b) => visible(origins[fi],a,b)) || {mesh: prepared, edges: new Set(), replacements: new Map()};
+  for (const key of aligned) for (const child of result.replacements.get(key) || [key]) result.edges.add(child);
+  return result.edges.size ? result : null;
+}
+function _knifeCutBoundaries(mesh, projected, from, to, visible) {
   const d = [to.x - from.x, to.y - from.y], length = Math.hypot(...d), eps = 1e-8;
   if (!Number.isFinite(length) || length < 1e-5) return null;
   const plans = [];

@@ -7,7 +7,7 @@ function knifeReset() {
   requestRender();
 }
 function knifeActive() { return S.tool === 'knife' && S.mode === 'edit' && S.workspace === 'model' && KNIFE.object === S.active && KNIFE.source === S.active?.mesh; }
-function knifeHint() { hint('Tap vertices or edges · Apply to finish'); }
+function knifeHint() { hint('Tap a face, edge or vertex · Apply to finish'); }
 function knifeActivate() {
   if (knifeActive()) { knifeHint(); return; }
   if (!needEdit() || S.workspace !== 'model') return;
@@ -72,18 +72,26 @@ function knifePick(x, y, radius = 18) {
     list.sort((a, b) => a.distance - b.distance || a.screen.z - b.screen.z);
     for (const pick of list) if (knifePointVisible(pick.point)) return pick;
   }
+  // Interior face placement uses the rendered surface, including concave
+  // n-gons. Preview cuts leave that surface in place until Apply.
+  const ray = screenRay(x, y);
+  const hit = ray.intersectObjects(S.objects.filter(o => o.visible).map(o => o.meshNode).filter(Boolean), false)[0];
+  if (hit?.object === KNIFE.object.meshNode) {
+    const point = hit.point.clone().applyMatrix4(KNIFE.object.node.matrixWorld.clone().invert()).toArray();
+    return {point, screen: knifeScreen(point), kind: 'Face', distance: 0};
+  }
   return null;
 }
 function knifeTap(x, y, radius) {
   const pick = knifePick(x, y, radius);
-  if (!pick) { toast('Knife · tap a visible vertex or edge'); return; }
+  if (!pick) { toast('Knife · tap a visible face, edge or vertex'); return; }
   KNIFE.hover = pick;
   if (!KNIFE.first) { KNIFE.first = pick; requestRender(); return; }
   const from = knifeScreen(KNIFE.first.point), to = knifeScreen(pick.point);
   if (!from.valid || !to.valid) { toast('Bring both cut points into view'); return; }
   const result = knifeCutProjected(KNIFE.mesh, KNIFE.mesh.verts.map(knifeScreen), from, to,
     (_fi, a, b) => [.2, .5, .8].every(t => knifePointVisible(vlerp(a, b, t))));
-  if (!result) { toast('No face crossed · choose another edge or vertex'); requestRender(); return; }
+  if (!result) { toast('No new cut · choose another point on the surface'); requestRender(); return; }
   KNIFE.steps.push({mesh: KNIFE.mesh, first: KNIFE.first, edges: new Set(KNIFE.edges)});
   if (KNIFE.steps.length > UNDO.max) KNIFE.steps.shift();
   KNIFE.mesh = result.mesh;
@@ -108,7 +116,7 @@ function drawKnife() {
     const p = knifeScreen(pick.point); if (!p.valid) continue;
     const vertex = pick.kind === 'Vertex';
     ctx.beginPath(); ctx.arc(p.x, p.y, vertex ? 7 : 5, 0, Math.PI * 2);
-    ctx.fillStyle = '#151a22'; ctx.fill(); ctx.strokeStyle = vertex ? '#84f0b0' : '#ffd180'; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = '#151a22'; ctx.fill(); ctx.strokeStyle = vertex ? '#84f0b0' : pick.kind === 'Face' ? '#9edbff' : '#ffd180'; ctx.lineWidth = 2; ctx.stroke();
     if (vertex) { ctx.beginPath(); ctx.arc(p.x, p.y, 2, 0, Math.PI * 2); ctx.fillStyle = '#84f0b0'; ctx.fill(); }
   }
 }
