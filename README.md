@@ -21,6 +21,7 @@ There's no App Store, Mac or developer account involved. When a new version is p
 | Transform | Move, Rotate, Scale and Shrink/Fatten. Drag anywhere, lock to X / Y / Z or a plane, tap twice for local axes, or type an exact value. Snap increments, proportional editing with six falloffs. Pivot: median, bounding box, individual origins, 3D cursor, active. Orientation: global, local, normal, view. Gizmo tools for direct handles. |
 | Modeling | Extrude (region, individual, along normals), Inset (region / individual, depth), Loop Cut and Slide (multiple cuts), Subdivide, Fill, Grid Fill, Triangle Fill, Bridge Edge Loops, Merge (center, cursor, collapse, by distance), Delete and Dissolve, Duplicate, Separate, Join, Triangulate, Tris to Quads, Recalculate / Flip normals, Smooth / Flat shading, Mirror. |
 | Measure | Ruler with two-tap endpoints, vertex/edge snapping by default, meters by default, adjustable scale and display units, undo and saved measurements. |
+| Track workspaces | Switch Model / KCL / KMP without replacing the scene or camera. Assign all 32 collision types and variants per material, mark Finish line as normal road, export KCL and a type-list CSV. Place/aim a KMP start on the road height; export automatic Time Trials test scaffolding or update an existing KMP while preserving its other sections. |
 | BRRES editor | Open archives, list every model material with its texture links (including color-only materials), inspect resource/texture formats, preview all common Wii texture encodings, replace/resize/convert textures, regenerate mipmaps and save a copy. |
 | Modifiers | Wrench panel with non-destructive Catmull–Clark / Simple subdivision (levels 0–3), editable control mesh, Apply, undo and project persistence. |
 | Objects | Origin to geometry or cursor, Apply location / rotation / scale, Separate by material / loose parts, Snap menu, Hide / Reveal, numeric transform panel, scene list. |
@@ -29,7 +30,7 @@ There's no App Store, Mac or developer account involved. When a new version is p
 | Viewport | Wireframe, Solid, Material Preview and Rendered shading; face orientation overlay; navigation ball with one-tap front / side / top views; perspective / orthographic. |
 | Files | Export Wii BRRES (static model + textures), OBJ+MTL, binary FBX 7.4 (textures embedded), COLLADA DAE, glTF 2.0 (.glb or .gltf). Import OBJ + MTL + images. Save and open `.pocketmesh.json` projects. Exports go through the iOS share sheet (Save to Files, AirDrop, other apps). |
 
-See [Basic track authoring](TRACK-AUTHORING.md) for the BRRES workflow, format limits, validation and the additional collision/race data needed for a playable Mario Kart Wii course.
+See [Basic track authoring](TRACK-AUTHORING.md) for the BRRES/KCL/KMP workflow, format limits, validation and the additional course packaging needed for a playable Mario Kart Wii course.
 
 ## Gestures
 

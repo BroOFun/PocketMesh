@@ -92,3 +92,18 @@ mesh coordinates or the separate export scale.
 
 BRRES editor archives and texture edits are separate transient state and are not
 serialized in modeling projects. Save them with the editor’s BRRES download.
+
+## Track authoring
+
+Optional flat material fields: `kclEnabled` (default true), `kclFlag` (16-bit
+unsigned, default 0), `kclFinish` (editor label; forces exported flag 0). These
+apply to every face referring to the material, through its object's slot table.
+
+Project `track`: `{scale, start, clearance, template, templateName}`. `start` is
+null or `{position:[x,y,z], rotation:[pitch,yaw,roll]}`. Position is in editor
+Z-up model units; rotation is explicitly Wii Euler degrees. Export uses
+`[x*scale,z*scale,-y*scale]`. `template` is an optional base64 KMP v2520; it is
+immutable and stored with the project to support lossless section preservation.
+New KMP exports contain generated test scaffolding; imported KMP exports patch
+only the first KTPT position/rotation. `workspace` and color-overlay visibility
+are transient UI state.

@@ -523,7 +523,7 @@ function pmCancel() {
 let GZ = null;
 function gizmoSync() {
   const toolMode = { move: 'translate', rotate: 'rotate', scale: 'scale' }[S.tool];
-  const show = !!toolMode && !TF.active && !PM.active && hasAnySel() && S.view !== 'uv';
+  const show = S.workspace === 'model' && !!toolMode && !TF.active && !PM.active && hasAnySel() && S.view !== 'uv';
   tc.enabled = show; tc.visible = show;
   if (!show) { requestRender(); return; }
   tc.setMode(toolMode);

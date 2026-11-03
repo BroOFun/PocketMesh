@@ -51,6 +51,11 @@ input, select { font: inherit; color: var(--fg); }
 #top { overflow: hidden; border-bottom: 1px solid #0c0d10; padding-top: max(6px, env(safe-area-inset-top, 0px)); }
 #sub { padding-block: 4px 6px; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--line); }
 #sub::-webkit-scrollbar { display: none; }
+#sub > .segrow { display: flex; flex-wrap: nowrap; flex: 0 0 auto; gap: 3px; }
+#sub > .segrow button { padding: 5px 11px; min-height: 32px; }
+#sub > .btn { flex: 0 0 auto; white-space: nowrap; }
+.trackCatalog summary { cursor: pointer; font-weight: 600; }
+.trackCatalog details > div { padding: 6px 0; font-size: 13px; }
 .spacer { flex: 1; }
 .ib { width: 36px; height: 36px; display: inline-grid; place-items: center; border: 0; border-radius: var(--r); background: transparent; cursor: pointer; flex: none; }
 .ib svg { width: 21px; height: 21px; }
@@ -244,6 +249,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
     <section class="pane" id="pane3d">
       <canvas class="view" id="c3d"></canvas>
       <canvas class="view" id="rulerCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
+      <canvas class="view" id="trackCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
       <div class="ovl" id="stats"></div>
       <div class="ovl toolcol" id="tools"></div>
       <div class="ovl" id="navwrap"><canvas id="nav" width="184" height="184"></canvas><div class="navbtns" id="navbtns"></div></div>
@@ -269,6 +275,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   <input type="file" id="fileProj" accept=".json,application/json" hidden>
   <input type="file" id="fileObj" multiple hidden>
   <input type="file" id="fileMat" multiple hidden>
+  <input type="file" id="fileKMP" accept=".kmp" hidden>
   <input type="file" id="fileBRRES" accept=".brres" hidden>
   <input type="file" id="fileBRRESTexture" accept="image/*" hidden>
 </div>
@@ -3918,6 +3925,7 @@ function _exPrepare(scene, o) {
       texture: tex,
       alphaMode: s?.alphaMode || 'auto', alphaCutoff: s?.alphaCutoff == null ? 0.5 : _exClamp01(s.alphaCutoff), doubleSided: s?.doubleSided !== false, wrap: s?.wrap || 'repeat',
       filter: s?.texture?.filter === 'nearest' ? 'nearest' : 'linear',
+      kclFlag: s?.kclFlag ?? 0, kclEnabled: s?.kclEnabled !== false, kclFinish: !!s?.kclFinish,
       index: materials.length,
     };
     materials.push(m);
@@ -5699,6 +5707,612 @@ function perspectiveEdgeParameter(screenT, clipWA, clipWB) {
   return (screenT / clipWB) / ((1 - screenT) / clipWA + screenT / clipWB);
 }
 
+// ==== kcl.js ====
+// Mario Kart Wii collision attributes and binary prisms. Format references:
+// https://mkwiiki.org/wiki/KCL_(File_Format)
+// https://mkwiiki.org/wiki/KCL_flag
+// https://github.com/doldecomp/mkw/blob/main/src/field/KCollision.hpp
+// Names are format identifiers; unknown/slot-dependent variants are deliberately marked.
+const _KC_NAMES = [
+  'Road',
+  'Slippery Road 1',
+  'Weak Off-road',
+  'Off-road',
+  'Heavy Off-road',
+  'Slippery Road 2',
+  'Boost Panel',
+  'Boost Ramp',
+  'Jump Pad',
+  'Item Road',
+  'Solid Fall',
+  'Moving Water',
+  'Wall',
+  'Invisible Wall',
+  'Item Wall',
+  'Wall 2',
+  'Fall Boundary',
+  'Cannon Trigger',
+  'Force Recalculation',
+  'Half-Pipe Ramp',
+  'Player-Only Wall',
+  'Moving Road',
+  'Sticky Road',
+  'Road 2',
+  'Sound Trigger',
+  'Weak Wall',
+  'Effect Trigger',
+  'Item State Modifier',
+  'Half-Pipe Invisible Wall',
+  'Rotating Road',
+  'Special Wall',
+  'Invisible Wall 2',
+];
+const _KC_VARIANTS = [
+  [
+    'Normal',
+    'Dirt (slot effects)',
+    'Dirt (no particles)',
+    'Smooth',
+    'Wood',
+    'Snow',
+    'Metal grate',
+    'Interrupted road sound',
+  ],
+  [
+    'White sand',
+    'Dirt',
+    'Water (unused)',
+    'Snow (unused)',
+    'Grass (unused)',
+    'Yellow sand',
+    'Sand (unused)',
+    'Dirt (unused)',
+  ],
+  ['Orange sand', 'Dirt', 'Water', 'Dark grass', 'Light sand', 'Carpet', 'Gravel', 'Gravel impact'],
+  ['Sand', 'Dirt', 'Mud', 'Water (unused)', 'Grass', 'Light sand', 'Gravel', 'Carpet'],
+  ['Sand (unused)', 'Dirt (unused)', 'Mud', 'Flowers', 'Grass', 'Snow', 'Sand', 'Dirt (unused)'],
+  [
+    'Ice',
+    'Mud (unused)',
+    'Water (unused)',
+    'Water (unused)',
+    'Water (unused)',
+    'Water (unused)',
+    'Road sound (unused)',
+    'Road sound (unused)',
+  ],
+  ['Standard boost', 'Rotating with casino_roulette'],
+  [
+    'Double flip',
+    'Single flip',
+    'Stunt (unused)',
+    'Stunt (unused)',
+    'Stunt (unused)',
+    'Stunt (unused)',
+    'Stunt (unused)',
+  ],
+  [
+    'Speed 50 / lift 35',
+    'Speed 50 / lift 47',
+    'Speed 59 / lift 30',
+    'Speed 73 / lift 45 (boost: 100 / 70)',
+    'Speed 73 / lift 53 (boost: 100 / 65)',
+    'Speed 56 / lift 50',
+    'Speed 55 / lift 35',
+    'Speed 56 / lift 50 (unused)',
+  ],
+  ['Unknown', 'Unknown', 'Metal grate usage', 'Wood / grass usage', 'Unknown (unused)', 'Bush usage'],
+  ['Sand', 'Underwater sand', 'Tiles', 'Ice', 'Dirt', 'Grass', 'Wood', 'Dark sand'],
+  [
+    'Downward current',
+    'Strong downward current',
+    'Forward current',
+    'Current without acceleration',
+    'Asphalt (unused)',
+    'Asphalt (unused)',
+    'Road (unused)',
+    'Road (unused)',
+  ],
+  ['Normal', 'Rock', 'Metal', 'Wood', 'Ice', 'Bush', 'Rope', 'Rubber'],
+  ['Silent', 'Sparks / voice (unused)', 'Sparks / voice (unused)'],
+  ['Unknown', 'Rock usage', 'Metal usage', 'Unknown', 'Unknown (unused)', 'Bush usage'],
+  ['Normal', 'Rock', 'Metal', 'Wood', 'Ice', 'Bush (unused)', 'Rope', 'Rubber'],
+  ['Air', 'Water', 'Lava', 'Icy water', 'Lava without particles', 'Burning air', 'Quicksand', 'Short fall'],
+  Array.from({ length: 8 }, (_, i) => 'CNPT index ' + i),
+  ['Standard'],
+  ['Standard', 'With boost'],
+  [
+    'Normal (unused)',
+    'Rock (unused)',
+    'Metal (unused)',
+    'Wood',
+    'Ice (unused)',
+    'Bush (unused)',
+    'Rope (unused)',
+    'Silent',
+  ],
+  [
+    'BeltCrossing west / escalator',
+    'BeltCrossing east / escalator west',
+    'BeltEasy east',
+    'BeltEasy west',
+    'BeltCurveA clockwise',
+    'BeltCurveA counterclockwise',
+  ],
+  ['Wood', 'Gravel', 'Carpet', 'Dirt', 'Wood sound', 'Road (slot sound)', 'Road', 'Mud'],
+  [
+    'Low road sound',
+    'Carpet',
+    'Grass (slot particles)',
+    'Mushroom road',
+    'Grass',
+    'Glass',
+    'Dirt',
+    'Road (slot sound)',
+  ],
+  Array.from({ length: 8 }, () => 'Track-slot dependent'),
+  ['Standard'],
+  [
+    'BLIGHT change',
+    'BLIGHT change (alternate)',
+    'Water splash',
+    'starGate activation',
+    'Cancel half-pipe',
+    'Despawn coins',
+    'Unknown (chimneys)',
+    'Unknown (unused)',
+  ],
+  ['Standard'],
+  ['Standard'],
+  ['Rope', 'Road impact', 'Road', 'Glass', 'Carpet', 'starGate sound (unused)', 'Sand (unused)', 'Dirt (unused)'],
+  [
+    'Cactus spin-out',
+    'Silent lavafall wall',
+    'Bouncy (unused)',
+    'Silent banner wall',
+    'Rainbow Road railing',
+    'Mushroom sides',
+    'Metal',
+    'starGate sides',
+  ],
+  ['Silent'],
+];
+const KCL_TYPES = _KC_NAMES.map((name, id) => ({
+  id,
+  name,
+  variants: Array.from({ length: 8 }, (_, i) => _KC_VARIANTS[id][i] || 'Unknown (unused)'),
+  color: [0x06, 0x07, 0x08, 0x13].includes(id)
+    ? '#ffbb40'
+    : [2, 3, 4].includes(id)
+      ? '#8ebd55'
+      : [0x0a, 0x10].includes(id)
+        ? '#ff5979'
+        : [0xc, 0xd, 0xe, 0xf, 0x14, 0x19, 0x1c, 0x1e, 0x1f].includes(id)
+          ? '#ae88ed'
+          : '#69cbd6',
+  note:
+    {
+      6: 'Variant 1 needs casino_roulette for rotation.',
+      7: 'Already trickable: leave the trick bit off.',
+      8: 'Already trickable. Variant 3 has the known off-road glitch.',
+      11: 'Needs KMP moving-water AREA and route data.',
+      16: 'Water/lava effects may need a pocha object; falling needs respawn data.',
+      17: 'Requires the corresponding CNPT destination in KMP.',
+      18: 'Needs KMP AREA type 4 and valid enemy paths.',
+      19: 'Already trickable.',
+      21: 'Requires conveyor/escalator objects.',
+      24: 'Behavior depends on the replaced track slot.',
+      26: 'Some variants need KMP objects or lighting data.',
+      29: 'Rotation needs casino_roulette; otherwise ordinary road.',
+      30: 'Some sounds need track-specific objects or slots.',
+    }[id] || '',
+}));
+function decodeKCLFlag(flag) {
+  return {
+    type: flag & 31,
+    variant: (flag >>> 5) & 7,
+    blight: (flag >>> 8) & 7,
+    depth: (flag >>> 11) & 3,
+    trick: !!(flag & 0x2000),
+    reject: !!(flag & 0x4000),
+    soft: !!(flag & 0x8000),
+  };
+}
+function encodeKCLFlag(f) {
+  for (const [key, max] of [
+    ['type', 31],
+    ['variant', 7],
+    ['blight', 7],
+    ['depth', 3],
+  ])
+    if (!Number.isInteger(f[key] ?? 0) || (f[key] ?? 0) < 0 || (f[key] ?? 0) > max)
+      throw new Error('Invalid KCL ' + key);
+  return (
+    (f.type || 0) |
+    ((f.variant || 0) << 5) |
+    ((f.blight || 0) << 8) |
+    ((f.depth || 0) << 11) |
+    (f.trick ? 0x2000 : 0) |
+    (f.reject ? 0x4000 : 0) |
+    (f.soft ? 0x8000 : 0)
+  );
+}
+function kclHex(n) {
+  return '0x' + (n & 65535).toString(16).toUpperCase().padStart(4, '0');
+}
+function kclCatalogCSV() {
+  const rows = [['type', 'name', 'variant', 'flag', 'variant_name', 'notes']];
+  for (const t of KCL_TYPES)
+    for (let v = 0; v < 8; v++) rows.push([kclHex(t.id), t.name, v, kclHex(t.id | (v << 5)), t.variants[v], t.note]);
+  return rows.map((r) => r.map((x) => '"' + String(x).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+}
+const _kcSub = (a, b) => a.map((v, i) => v - b[i]);
+const _kcCross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const _kcDot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+const _kcUnit = (a) => {
+  const n = Math.hypot(...a);
+  return n > 1e-12 ? a.map((v) => v / n) : null;
+};
+function exportKCL(input, { thickness = 300, radius = 250 } = {}) {
+  if (!Array.isArray(input) || !input.length)
+    throw new Error('No collision triangles. Enable collision on a visible material.');
+  if (input.length > 65535)
+    throw new Error('KCL supports at most 65,535 triangles. Reduce subdivision or exclude scenery.');
+  if (!Number.isFinite(thickness) || thickness <= 0 || !Number.isFinite(radius) || radius <= 0)
+    throw new Error('Invalid KCL collision margin');
+  const positions = [],
+    normals = [],
+    pm = new Map(),
+    nm = new Map(),
+    prisms = [],
+    bounds = [];
+  function index(a, list, map) {
+    a = a.map(Math.fround);
+    const key = a.join(',');
+    if (!map.has(key)) {
+      if (list.length >= 65536) throw new Error('KCL vector limit exceeded. Simplify the collision mesh.');
+      map.set(key, list.length);
+      list.push(a);
+    }
+    return map.get(key);
+  }
+  const min = [Infinity, Infinity, Infinity],
+    max = [-Infinity, -Infinity, -Infinity];
+  let skipped = 0;
+  for (const t of input) {
+    if (!t.points || t.points.length !== 3 || !t.points.every((p) => p.length === 3 && p.every(Number.isFinite)))
+      throw new Error('Collision geometry contains invalid coordinates');
+    if (!Number.isInteger(t.flag) || t.flag < 0 || t.flag > 65535) throw new Error('Invalid 16-bit KCL flag');
+    const [a, b, c] = t.points.map((p) => p.map(Math.fround)),
+      ab = _kcSub(b, a),
+      ac = _kcSub(c, a),
+      n = _kcUnit(_kcCross(ab, ac));
+    if (!n) {
+      skipped++;
+      continue;
+    }
+    const na = _kcUnit(_kcCross(n, ac)),
+      nb = _kcUnit(_kcCross(ab, n)),
+      nc = _kcUnit(_kcCross(n, _kcSub(b, c)));
+    const len = _kcDot(ab, nc);
+    if (!Number.isFinite(len) || len < 0.001) {
+      skipped++;
+      continue;
+    }
+    prisms.push([len, index(a, positions, pm), ...[n, na, nb, nc].map((v) => index(v, normals, nm)), t.flag]);
+    // Conservative prism AABB includes the full backwards extrusion and sphere radius.
+    // False positives are safe: the game's prism test does the exact narrow phase.
+    const lo = [0, 1, 2].map((i) => Math.min(a[i], b[i], c[i]) - Math.max(0, n[i] * thickness) - radius - 1);
+    const hi = [0, 1, 2].map((i) => Math.max(a[i], b[i], c[i]) - Math.min(0, n[i] * thickness) + radius + 1);
+    bounds.push([lo, hi]);
+    lo.forEach((v, i) => {
+      min[i] = Math.min(min[i], v);
+      max[i] = Math.max(max[i], hi[i]);
+    });
+  }
+  if (!prisms.length) throw new Error('All collision triangles are degenerate');
+  for (let i = 0; i < 3; i++) min[i] = Math.floor(min[i]);
+  const shift = Math.max(1, Math.ceil(Math.log2(Math.max(...max.map((v, i) => v - min[i] + 1)))));
+  if (shift > 26) throw new Error('Collision bounds are too large. Check export scale and object positions.');
+  const size = 2 ** shift,
+    words = [0],
+    leafPatches = [],
+    leaves = new Map();
+  let nodes = 1;
+  function node(slot, base, ids, lo, width, depth) {
+    if (ids.length <= 32 || width <= 512 || depth >= 10 || nodes > 100000) {
+      leafPatches.push({ slot, base, key: ids.join(','), ids });
+      return;
+    }
+    const half = width / 2,
+      childLists = [],
+      childLows = [];
+    for (let k = 0; k < 8; k++) {
+      const cl = lo.map((v, i) => v + ((k >> i) & 1) * half);
+      childLows.push(cl);
+      childLists.push(
+        ids.filter((id) => bounds[id - 1][0].every((v, i) => v <= cl[i] + half && bounds[id - 1][1][i] >= cl[i])),
+      );
+    }
+    if (childLists.every((ids2) => ids2.length === ids.length)) {
+      leafPatches.push({ slot, base, key: ids.join(','), ids });
+      return;
+    }
+    const child = words.length;
+    words[slot] = child * 4 - base;
+    words.push(0, 0, 0, 0, 0, 0, 0, 0);
+    nodes += 8;
+    for (let k = 0; k < 8; k++) node(child + k, child * 4, childLists[k], childLows[k], half, depth + 1);
+  }
+  node(
+    0,
+    0,
+    prisms.map((_, i) => i + 1),
+    min,
+    size,
+    0,
+  );
+  let treeSize = words.length * 4;
+  for (const p of leafPatches)
+    if (!leaves.has(p.key)) {
+      leaves.set(p.key, { offset: treeSize, ids: p.ids });
+      treeSize += 4 + p.ids.length * 2;
+    }
+  if (treeSize > 64 * 1024 * 1024) throw new Error('Collision octree is too large. Simplify the collision mesh.');
+  for (const p of leafPatches) words[p.slot] = ((leaves.get(p.key).offset - p.base) | 0x80000000) >>> 0;
+  const posOff = 60,
+    normOff = posOff + positions.length * 12,
+    prismOff = normOff + normals.length * 12,
+    treeOff = prismOff + prisms.length * 16;
+  const bytes = new Uint8Array(treeOff + treeSize),
+    v = new DataView(bytes.buffer);
+  [posOff, normOff, prismOff - 16, treeOff].forEach((n, i) => v.setUint32(i * 4, n));
+  v.setFloat32(16, thickness);
+  min.forEach((n, i) => v.setFloat32(20 + i * 4, n));
+  for (let i = 0; i < 3; i++) v.setUint32(32 + i * 4, ~(size - 1) >>> 0);
+  v.setUint32(44, shift);
+  v.setUint32(48, 0);
+  v.setUint32(52, 0);
+  v.setFloat32(56, radius);
+  positions.forEach((p, i) => p.forEach((n, j) => v.setFloat32(posOff + i * 12 + j * 4, n)));
+  normals.forEach((p, i) => p.forEach((n, j) => v.setFloat32(normOff + i * 12 + j * 4, n)));
+  prisms.forEach((p, i) => {
+    const o = prismOff + i * 16;
+    v.setFloat32(o, p[0]);
+    for (let j = 1; j < 7; j++) v.setUint16(o + 2 + j * 2, p[j]);
+  });
+  words.forEach((n, i) => v.setUint32(treeOff + i * 4, n));
+  for (const { offset, ids } of leaves.values()) ids.forEach((n, i) => v.setUint16(treeOff + offset + 2 + i * 2, n)); // leading/trailing zero sentinels
+  return { bytes, triangleCount: prisms.length, skipped, nodeCount: nodes };
+}
+
+// ==== kmp.js ====
+// KMP v2520 (RKMD), big endian. Preserves imported sections byte-for-byte.
+// https://mkwiiki.org/wiki/KMP_(File_Format)
+const _KP_NAMES = [
+  'KTPT',
+  'ENPT',
+  'ENPH',
+  'ITPT',
+  'ITPH',
+  'CKPT',
+  'CKPH',
+  'GOBJ',
+  'POTI',
+  'AREA',
+  'CAME',
+  'JGPT',
+  'CNPT',
+  'MSPT',
+  'STGI',
+];
+function normalizeTrack(data = {}) {
+  const scale = Number(data.scale);
+  const start =
+    data.start &&
+    Array.isArray(data.start.position) &&
+    data.start.position.length === 3 &&
+    data.start.position.every(Number.isFinite)
+      ? {
+          position: data.start.position.slice(),
+          rotation:
+            Array.isArray(data.start.rotation) &&
+            data.start.rotation.length === 3 &&
+            data.start.rotation.every(Number.isFinite)
+              ? data.start.rotation.slice()
+              : [0, 0, 0],
+        }
+      : null;
+  return {
+    scale: Number.isFinite(scale) && scale >= 0.001 && scale <= 100000 ? scale : 1,
+    start,
+    clearance: Number.isFinite(data.clearance) ? Math.max(0, Math.min(100, data.clearance)) : 0.2,
+    template: typeof data.template === 'string' ? data.template : null,
+    templateName: typeof data.templateName === 'string' ? data.templateName : '',
+  };
+}
+function trackToWii(p, scale = 1) {
+  return [p[0] * scale, p[2] * scale, -p[1] * scale];
+}
+function trackFromWii(p, scale = 1) {
+  return [p[0] / scale, -p[2] / scale, p[1] / scale];
+}
+function inspectKMP(input) {
+  const bytes = input instanceof Uint8Array ? Uint8Array.from(input) : new Uint8Array(input),
+    v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const text = (o) => String.fromCharCode(...bytes.slice(o, o + 4));
+  if (bytes.length < 16 || text(0) !== 'RKMD') throw new Error('Not a Mario Kart Wii KMP file');
+  const count = v.getUint16(8),
+    header = v.getUint16(10);
+  if (count < 1 || count > 64 || header < 16 + 4 * count || header > bytes.length || v.getUint32(4) !== bytes.length)
+    throw new Error('Invalid KMP header or file length');
+  const version = v.getUint32(header - count * 4 - 4);
+  if (version !== 2520) throw new Error('Only Mario Kart Wii KMP version 2520 is supported');
+  const offsets = Array.from({ length: count }, (_, i) => header + v.getUint32(header - count * 4 + i * 4));
+  if (new Set(offsets).size !== count || offsets.some((o) => o < header || o + 8 > bytes.length))
+    throw new Error('Invalid KMP section offsets');
+  const sorted = [...offsets].sort((a, b) => a - b),
+    sections = offsets.map((o) => {
+      const end = sorted[sorted.indexOf(o) + 1] ?? bytes.length;
+      if (end < o + 8) throw new Error('Overlapping KMP sections');
+      return {
+        name: text(o),
+        count: v.getUint16(o + 4),
+        extra: v.getUint16(o + 6),
+        offset: o,
+        bytes: bytes.slice(o, end),
+      };
+    });
+  if (new Set(sections.map((s) => s.name)).size !== sections.length) throw new Error('Duplicate KMP sections');
+  const ktpt = sections.find((s) => s.name === 'KTPT');
+  let start = null;
+  if (ktpt) {
+    if (ktpt.bytes.length < 8 + ktpt.count * 28) throw new Error('Truncated KTPT section');
+    if (ktpt.count) {
+      const o = ktpt.offset + 8;
+      start = {
+        position: [0, 1, 2].map((i) => v.getFloat32(o + i * 4)),
+        rotation: [0, 1, 2].map((i) => v.getFloat32(o + 12 + i * 4)),
+      };
+      if (![...start.position, ...start.rotation].every(Number.isFinite)) throw new Error('Invalid KTPT coordinates');
+    }
+  }
+  return { bytes, sections, start, version };
+}
+// Original temporary drive-test scaffold, not a route fitted to the model.
+// A linked loop avoids the game dereferencing empty path/checkpoint groups.
+function _kpTestSections(start, scale) {
+  const p = trackToWii(start.position, scale),
+    yaw = (start.rotation[1] * Math.PI) / 180;
+  const forward = [Math.sin(yaw), 0, Math.cos(yaw)],
+    right = [-Math.cos(yaw), 0, Math.sin(yaw)];
+  const radius = 5000,
+    center = p.map((v, i) => v + right[i] * radius + forward[i] * 500);
+  const radial = [right.map((v) => -v), forward, right, forward.map((v) => -v)];
+  const point = (i, r) => center.map((v, j) => v + radial[i][j] * r);
+  const sections = _KP_NAMES.map((name) => {
+    const count =
+      { ENPT: 4, ENPH: 1, ITPT: 4, ITPH: 1, CKPT: 4, CKPH: 1, JGPT: 1, CAME: 2, POTI: 1, STGI: 1 }[name] || 0;
+    const stride =
+      { ENPT: 20, ENPH: 16, ITPT: 20, ITPH: 16, CKPT: 20, CKPH: 16, JGPT: 28, CAME: 72, POTI: 36, STGI: 12 }[name] || 0;
+    const bytes = new Uint8Array(8 + count * stride),
+      v = new DataView(bytes.buffer);
+    Array.from(name).forEach((c, i) => (bytes[i] = c.charCodeAt(0)));
+    v.setUint16(4, count);
+    const vector = (o, p) => p.forEach((x, i) => v.setFloat32(o + i * 4, x));
+    if (name === 'ENPT' || name === 'ITPT')
+      for (let i = 0; i < 4; i++) {
+        vector(8 + i * 20, point(i, radius));
+        v.setFloat32(20 + i * 20, 10);
+      }
+    if (['ENPH', 'ITPH', 'CKPH'].includes(name)) {
+      bytes[9] = 4;
+      bytes.fill(255, 10, 22);
+      bytes[10] = bytes[16] = 0;
+    }
+    if (name === 'CKPT')
+      for (let i = 0; i < 4; i++) {
+        const l = point(i, radius * 1.9),
+          r = point(i, radius * 0.1),
+          o = 8 + i * 20;
+        [l[0], l[2], r[0], r[2]].forEach((x, j) => v.setFloat32(o + j * 4, x));
+        bytes[o + 17] = i === 0 ? 0 : i === 2 ? 1 : 255;
+        bytes[o + 18] = i === 0 ? 255 : i - 1;
+        bytes[o + 19] = i === 3 ? 255 : i + 1;
+      }
+    if (name === 'JGPT') {
+      vector(
+        8,
+        p.map((v, i) => (i === 1 ? v + 100 : v)),
+      );
+      vector(20, start.rotation);
+    }
+    if (name === 'CAME') {
+      bytes[6] = 1; // opening camera 1; goal/selection camera 0
+      for (let i = 0; i < 2; i++) {
+        const o = 8 + i * 72;
+        bytes[o] = i ? 5 : 0;
+        bytes[o + 1] = 255;
+        bytes[o + 3] = i ? 0 : 255;
+        vector(
+          o + 12,
+          p.map((v, j) => v - forward[j] * 1500 + (j === 1 ? 1000 : 0)),
+        );
+        v.setFloat32(o + 36, 60);
+        v.setFloat32(o + 40, 60);
+        vector(o + 44, p);
+        vector(o + 56, p);
+        v.setFloat32(o + 68, 60);
+      }
+    }
+    if (name === 'POTI') {
+      v.setUint16(6, 2);
+      v.setUint16(8, 2);
+      for (let i = 0; i < 2; i++) {
+        vector(
+          12 + i * 16,
+          p.map((v, j) => v - forward[j] * 1500 + (j === 1 ? 1000 : 0) + right[j] * i * 100),
+        );
+        v.setUint16(24 + i * 16, 100);
+      }
+    }
+    if (name === 'STGI') {
+      bytes[8] = 3;
+      bytes[11] = 1;
+      v.setUint32(12, 0x00ffffff);
+      bytes[16] = 0x32;
+    }
+    return { name, bytes };
+  });
+  return sections;
+}
+function exportKMP(start, { scale = 1, template = null } = {}) {
+  if (
+    !start ||
+    !start.position ||
+    !start.rotation ||
+    start.position.length !== 3 ||
+    start.rotation.length !== 3 ||
+    ![...start.position, ...start.rotation, scale].every(Number.isFinite) ||
+    scale <= 0
+  )
+    throw new Error('Place a start point on the track first');
+  if (![...trackToWii(start.position, scale), ...start.rotation].every((n) => Number.isFinite(Math.fround(n))))
+    throw new Error('Start coordinates exceed the KMP number range');
+  let sections = template
+    ? inspectKMP(template).sections.map((s) => ({ name: s.name, bytes: s.bytes.slice() }))
+    : _kpTestSections(start, scale);
+  let section = sections.find((s) => s.name === 'KTPT');
+  if (!section) {
+    section = { name: 'KTPT', bytes: new Uint8Array(8) };
+    sections.unshift(section);
+  }
+  if (section.bytes.length < 36 || new DataView(section.bytes.buffer, section.bytes.byteOffset).getUint16(4) === 0) {
+    section.bytes = new Uint8Array(36);
+    section.bytes.set([75, 84, 80, 84, 0, 1]);
+    new DataView(section.bytes.buffer).setInt16(32, -1);
+  }
+  const kv = new DataView(section.bytes.buffer, section.bytes.byteOffset, section.bytes.byteLength);
+  trackToWii(start.position, scale).forEach((n, i) => kv.setFloat32(8 + i * 4, n));
+  start.rotation.forEach((n, i) => kv.setFloat32(20 + i * 4, n));
+  const header = 16 + sections.length * 4,
+    size = header + sections.reduce((n, s) => n + s.bytes.length, 0),
+    bytes = new Uint8Array(size),
+    v = new DataView(bytes.buffer);
+  bytes.set([82, 75, 77, 68]);
+  v.setUint32(4, size);
+  v.setUint16(8, sections.length);
+  v.setUint16(10, header);
+  v.setUint32(12, 2520);
+  let pos = header;
+  sections.forEach((s, i) => {
+    v.setUint32(16 + i * 4, pos - header);
+    bytes.set(s.bytes, pos);
+    pos += s.bytes.length;
+  });
+  return bytes;
+}
+
 // ==== app_core.js ====
 // ============================================================================
 // app_core.js — renderer, scene objects, overlays, camera, picking, selection, undo
@@ -5812,6 +6426,7 @@ const S = {
   snap: false, snapMove: 0.1, snapRot: 5, snapScale: 0.1,
   prop: false, propRadius: 1, propFalloff: 'smooth',
   shading: 'solid', xray: false, faceOrient: false, view: '3d',
+  workspace: 'model', track: normalizeTrack(),
   cursor: new THREE.Vector3(), ruler: normalizeRuler(),
   uvSel: new Set(), uvTool: 'select', uvStretch: false,
 };
@@ -6559,7 +7174,7 @@ function snapshot() {
     })),
     materials: S.materials.map((m) => ({ ...m })),
     active: S.active ? S.active.id : null, mode: S.mode, selectMode: S.selectMode,
-    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel), ruler: normalizeRuler(S.ruler),
+    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel), ruler: normalizeRuler(S.ruler), track: normalizeTrack(S.track),
   };
 }
 function restore(snap) {
@@ -6584,9 +7199,10 @@ function restore(snap) {
   S.objects = next;
   S.materials = snap.materials.map((m) => ({ ...m }));
   S.active = S.objects.find((o) => o.id === snap.active) || null;
-  S.mode = snap.mode === 'edit' && S.active ? 'edit' : 'object';
+  S.mode = S.workspace === 'model' && snap.mode === 'edit' && S.active ? 'edit' : 'object';
   S.selectMode = snap.selectMode;
   S.cursor.fromArray(snap.cursor);
+  S.track = normalizeTrack(snap.track);
   S.ruler = normalizeRuler(snap.ruler); rulerResetPending();
   S.uvSel = new Set(snap.uvSel);
   for (const o of S.objects) rebuildObject(o);
@@ -6663,6 +7279,7 @@ function frame(now) {
   renderer.render(scene, camera);
   drawNav();
   drawRuler();
+  drawTrack();
 }
 
 // ==== app_transform.js ====
@@ -7191,7 +7808,7 @@ function pmCancel() {
 let GZ = null;
 function gizmoSync() {
   const toolMode = { move: 'translate', rotate: 'rotate', scale: 'scale' }[S.tool];
-  const show = !!toolMode && !TF.active && !PM.active && hasAnySel() && S.view !== 'uv';
+  const show = S.workspace === 'model' && !!toolMode && !TF.active && !PM.active && hasAnySel() && S.view !== 'uv';
   tc.enabled = show; tc.visible = show;
   if (!show) { requestRender(); return; }
   tc.setMode(toolMode);
@@ -8383,7 +9000,7 @@ function serializeProject() {
     materials: S.materials,
     images: [...S.images.values()].filter((im) => used.has(im.id)).map((im) => ({ id: im.id, name: im.name, mime: im.mime, data: b64FromBytes(im.bytes) })),
     active: S.active ? S.active.id : null,
-    cursor: S.cursor.toArray(), ruler: normalizeRuler(S.ruler),
+    cursor: S.cursor.toArray(), ruler: normalizeRuler(S.ruler), track: normalizeTrack(S.track),
     camera: { target: CAM.target.toArray(), yaw: CAM.yaw, pitch: CAM.pitch, dist: CAM.dist, ortho: CAM.ortho },
     settings: { shading: S.shading, selectMode: S.selectMode, pivot: S.pivot, orient: S.orient },
   };
@@ -8396,6 +9013,7 @@ async function loadProject(data) {
   clearImages();
   S.objects = []; S.materials = [];
   S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
+  S.track = normalizeTrack(data.track || {scale: settingsGet('export', {}).scale});
   S.ruler = normalizeRuler(data.ruler); rulerResetPending();
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
@@ -8536,7 +9154,7 @@ function runExport(fmt, opts) {
   if (!scene.objects.length) throw new Error(opts.selectedOnly ? 'No selected objects to export' : 'Nothing to export');
   const eo = { yUp: opts.yUp, applyTransforms: opts.applyTransforms, triangulate: opts.triangulate, baseName: opts.baseName };
   let files;
-  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: opts.scale });
+  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: opts.scale ?? S.track.scale });
   else if (fmt === 'obj') files = exportOBJ(scene, eo);
   else if (fmt === 'fbx') files = exportFBX(scene, eo);
   else if (fmt === 'dae') files = exportDAE(scene, eo);
@@ -8750,7 +9368,7 @@ function buildBRRESMaterial(body, material) {
 }
 function buildBRRESEditor(body) {
   body.append(h('div',{class:'row'},h('button',{class:'btn primary',onclick:() => $('#fileBRRES').click()},'Open BRRES…'),h('button',{class:'btn',onclick:() => {
-    try { const file = runExport('brres',{baseName:'course_model',scale:1,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
+    try { const file = runExport('brres',{baseName:'course_model',scale:S.track.scale,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
   }},'Use current scene')));
   if (BRED.error) body.append(h('p',{class:'brres-error',role:'alert'},BRED.error));
   const a = BRED.archive;
@@ -8848,6 +9466,728 @@ $('#fileBRRESTexture').addEventListener('change',async (event) => {
     BRED.error=''; refreshSheet(true);
   } catch (e) { brresEditorError(e); } finally { URL.revokeObjectURL(url); }
 });
+
+// ==== app_track.js ====
+// Shared track workspaces: geometry and camera belong to the project, not a file panel.
+const TRACKVIEW = { material: null, colors: true, action: 'select', labels: [] };
+const trackOverlay = new THREE.Group();
+scene.add(trackOverlay);
+function trackButton(text, run, primary = false) {
+  return h('button', { class: 'btn' + (primary ? ' primary' : ''), onclick: run }, text);
+}
+function trackCommit(label) {
+  pushUndo(label);
+  trackRefresh();
+  buildSubbar();
+  refreshSheet(true);
+  requestRender();
+}
+function setTrackScale(value) {
+  S.track.scale = value;
+  const ex = settingsGet('export', {});
+  ex.scale = value;
+  settingsSet('export', ex);
+  trackCommit('Track export scale');
+}
+function trackScaleField() {
+  return field(
+    'Wii units per model unit',
+    numInput(S.track.scale, setTrackScale, { min: 0.001, max: 100000, label: 'Shared Wii export scale' }),
+  );
+}
+function setWorkspace(workspace) {
+  if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
+  if (TF.active) tfCancel();
+  if (PM.active) pmCancel();
+  closeSheet();
+  S.pendingTap = null;
+  S.multiSelect = false;
+  S.selOp = 'set';
+  rulerResetPending();
+  if (workspace !== 'model' && S.mode === 'edit') setMode('object');
+  S.workspace = workspace;
+  S.tool = 'select';
+  TRACKVIEW.action = 'select';
+  if (workspace !== 'model' && S.view !== '3d') setWorkView('3d');
+  $('#btnMode').hidden = workspace !== 'model';
+  $('#btnView').hidden = workspace !== 'model';
+  onModeChanged();
+  buildTools();
+  trackRefresh();
+  gizmoSync();
+  hint(
+    workspace === 'kcl'
+      ? 'Tap a surface to edit its material’s collision.'
+      : workspace === 'kmp'
+        ? 'Place Start snaps to the road. Aim sets the driving direction.'
+        : null,
+  );
+}
+function trackSubbar(bar) {
+  bar.append(
+    segButtons(
+      S.workspace,
+      [
+        ['model', 'Model'],
+        ['kcl', 'KCL'],
+        ['kmp', 'KMP'],
+      ],
+      setWorkspace,
+    ),
+  );
+  if (S.workspace === 'model') return false;
+  bar.append(
+    trackButton(S.workspace === 'kcl' ? 'Materials & flags' : 'Start point', S.workspace === 'kcl' ? openKCL : openKMP),
+    trackButton('Export ' + S.workspace.toUpperCase(), () => trackExport(S.workspace)),
+  );
+  return true;
+}
+function buildTrackShelf(sh) {
+  if (S.workspace === 'model') return false;
+  if (S.workspace === 'kcl')
+    sh.append(
+      shelfBtn('Materials', 'material', openKCL),
+      shelfBtn('Road types', 'layers', openKCLCatalog),
+      shelfBtn('Focus material', 'frame', trackFocusMaterial),
+    );
+  else
+    sh.append(
+      shelfBtn('Place Start', 'cursor', () => trackAction('place')),
+      shelfBtn('Aim Start', 'rotate', () => trackAction('aim')),
+      shelfBtn('Start settings', 'sliders', openKMP),
+      shelfBtn('Focus Start', 'frame', trackFocusStart),
+      shelfBtn('Open KMP', 'folder', () => $('#fileKMP').click()),
+    );
+  sh.append(
+    shelfBtn(TRACKVIEW.colors ? 'Colors On' : 'Colors Off', 'material', () => {
+      TRACKVIEW.colors = !TRACKVIEW.colors;
+      trackRefresh();
+      buildShelf();
+    }),
+    shelfBtn('Export ' + S.workspace.toUpperCase(), 'export', () => trackExport(S.workspace)),
+    shelfBtn('Scene', 'layers', openOutliner),
+  );
+  return true;
+}
+function trackAction(action) {
+  if (action === 'aim' && !S.track.start) {
+    toast('Place a start point first', true);
+    return;
+  }
+  closeSheet();
+  TRACKVIEW.action = action;
+  hint(
+    action === 'place'
+      ? 'Tap the road to place Start at its surface height.'
+      : 'Tap ahead of Start to set the driving direction.',
+  );
+  buildTools();
+}
+function trackScene() {
+  const ids = new Map(S.materials.map((m, i) => [m.id, i]));
+  return {
+    materials: S.materials.map((m) => ({ ...m, texture: null })),
+    objects: S.objects
+      .filter((o) => o.visible)
+      .map((o) => ({
+        name: o.name,
+        mesh: evaluateModifiers(o.mesh, o.modifiers),
+        position: o.node.position.toArray(),
+        quaternion: o.node.quaternion.toArray(),
+        scale: o.node.scale.toArray(),
+        materials: o.materials.map((id) => ids.get(id)),
+      })),
+  };
+}
+function trackTriangles() {
+  const prep = _exPrepare(trackScene(), { yUp: true, bake: true }),
+    triangles = [];
+  for (const o of prep.objects)
+    for (const f of o.faces) {
+      const m = prep.materials[f.mat];
+      if (m.kclEnabled === false) continue;
+      for (const t of _exFaceTris(f))
+        triangles.push({
+          points: t.map((i) => f.pts[i].map((n) => n * S.track.scale)),
+          flag: m.kclFinish ? 0 : (m.kclFlag ?? 0),
+        });
+    }
+  return triangles;
+}
+function trackMaterials() {
+  const ids = new Set();
+  for (const o of S.objects)
+    if (o.visible) for (const f of (o.renderMesh || o.mesh).faces) ids.add(o.materials[f.mat] ?? o.materials[0]);
+  return S.materials.filter((m) => ids.has(m.id));
+}
+function trackCurrentMaterial() {
+  const ms = trackMaterials();
+  return ms.find((m) => m.id === TRACKVIEW.material) || ms[0];
+}
+function trackRefresh() {
+  for (const child of [...trackOverlay.children]) {
+    trackOverlay.remove(child);
+    child.geometry.dispose();
+    child.material.dispose();
+  }
+  TRACKVIEW.labels = [];
+  trackOverlay.visible = S.workspace !== 'model';
+  if (S.workspace === 'model') {
+    requestRender();
+    return;
+  }
+  const pos = [],
+    colors = [],
+    groups = new Map();
+  scene.updateMatrixWorld(true);
+  for (const o of S.objects) {
+    if (!o.visible) continue;
+    const mesh = o.renderMesh || o.mesh;
+    for (const f of mesh.faces) {
+      const m = matById(o.materials[f.mat] ?? o.materials[0]);
+      if (!m) continue;
+      let g = groups.get(m.id);
+      if (!g) {
+        g = { material: m, box: new THREE.Box3(), points: 0 };
+        groups.set(m.id, g);
+      }
+      const col = new THREE.Color(
+        m.kclEnabled === false ? '#555555' : m.kclFinish ? '#ffffff' : KCL_TYPES[(m.kclFlag ?? 0) & 31].color,
+      );
+      for (const t of triangulateFace(mesh, f))
+        for (const i of t) {
+          const p = new THREE.Vector3(...mesh.verts[f.v[i]]).applyMatrix4(o.node.matrixWorld);
+          g.box.expandByPoint(p);
+          g.points++;
+          pos.push(...p.toArray());
+          colors.push(col.r, col.g, col.b);
+        }
+    }
+  }
+  TRACKVIEW.labels = [...groups.values()];
+  if (TRACKVIEW.colors && pos.length) {
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+    const mat = new THREE.MeshBasicMaterial({
+      vertexColors: true,
+      transparent: true,
+      opacity: 0.32,
+      side: THREE.DoubleSide,
+      depthWrite: false,
+      polygonOffset: true,
+      polygonOffsetFactor: -2,
+      polygonOffsetUnits: -2,
+    });
+    trackOverlay.add(new THREE.Mesh(geo, mat));
+  }
+  requestRender();
+}
+function drawTrack() {
+  const canvas = $('#trackCanvas'),
+    { w, h: height } = viewSize(),
+    dpr = Math.min(devicePixelRatio || 1, 2);
+  if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(w * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, height);
+  if (S.workspace === 'model') return;
+  function label(p, text, color) {
+    const s = toScreen(p);
+    if (s.z < -1 || s.z > 1 || s.x < 0 || s.x > w || s.y < 0 || s.y > height) return;
+    ctx.font = '600 12px system-ui';
+    const width = ctx.measureText(text).width + 14;
+    const x = Math.max(2, Math.min(w - width - 2, s.x - width / 2));
+    ctx.fillStyle = '#171b25e8';
+    ctx.fillRect(x, s.y - 24, width, 23);
+    ctx.strokeStyle = color;
+    ctx.strokeRect(x, s.y - 24, width, 23);
+    ctx.fillStyle = color;
+    ctx.fillText(text, x + 7, s.y - 8);
+  }
+  for (const g of TRACKVIEW.labels) {
+    const m = g.material;
+    if (m.kclFinish || m.id === TRACKVIEW.material) {
+      label(
+        g.box.getCenter(new THREE.Vector3()),
+        m.kclFinish
+          ? '⚑ Finish line · Road'
+          : m.name + ' · ' + (m.kclEnabled === false ? 'No collision' : KCL_TYPES[(m.kclFlag ?? 0) & 31].name),
+        m.kclFinish ? '#ffffff' : '#8de4ed',
+      );
+    }
+  }
+  if (S.track.start) {
+    const start = S.track.start,
+      p = new THREE.Vector3(...start.position),
+      yaw = start.rotation[1] * DEG,
+      len = Math.max(0.5, CAM.dist * 0.06),
+      q = p.clone().add(new THREE.Vector3(Math.sin(yaw) * len, -Math.cos(yaw) * len, 0)),
+      a = toScreen(p),
+      b = toScreen(q);
+    if (a.z >= -1 && a.z <= 1 && b.z >= -1 && b.z <= 1) {
+      ctx.strokeStyle = '#71f0aa';
+      ctx.lineWidth = 3;
+      ctx.beginPath();
+      ctx.moveTo(a.x, a.y);
+      ctx.lineTo(b.x, b.y);
+      const angle = Math.atan2(b.y - a.y, b.x - a.x);
+      ctx.moveTo(b.x - 11 * Math.cos(angle - 0.5), b.y - 11 * Math.sin(angle - 0.5));
+      ctx.lineTo(b.x, b.y);
+      ctx.lineTo(b.x - 11 * Math.cos(angle + 0.5), b.y - 11 * Math.sin(angle + 0.5));
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(a.x, a.y, 7, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    label(p, 'Start · ' + fmt(start.rotation[1], 1) + '°', '#71f0aa');
+  }
+}
+function trackHits(ray, drivable = false) {
+  scene.updateMatrixWorld(true);
+  const nodes = S.objects.filter((o) => o.visible).map((o) => o.meshNode);
+  return ray.intersectObjects(nodes, false).filter((hit) => {
+    if (!drivable) return true;
+    const o = hit.object.userData.obj,
+      f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]],
+      m = matById(o.materials[f.mat] ?? o.materials[0]);
+    if (m?.kclEnabled === false) return false;
+    const type = m?.kclFinish ? 0 : (m?.kclFlag ?? 0) & 31;
+    return [0, 1, 2, 3, 4, 5, 6, 7, 8, 11, 19, 21, 22, 23, 29].includes(type);
+  });
+}
+function trackTap(x, y) {
+  if (S.workspace === 'kcl') {
+    const hit = trackHits(screenRay(x, y))[0];
+    if (!hit) return;
+    const o = hit.object.userData.obj,
+      f = (o.renderMesh || o.mesh).faces[o.rd.triFace[hit.faceIndex]];
+    TRACKVIEW.material = o.materials[f.mat] ?? o.materials[0];
+    trackRefresh();
+    openKCL();
+    return;
+  }
+  if (TRACKVIEW.action === 'select') {
+    openKMP();
+    return;
+  }
+  const hit = trackHits(screenRay(x, y), true)[0];
+  if (!hit) {
+    toast('Tap a visible drivable surface. Check its KCL type.', true);
+    return;
+  }
+  if (TRACKVIEW.action === 'place') {
+    S.track.start = {
+      position: [hit.point.x, hit.point.y, hit.point.z + S.track.clearance],
+      rotation: S.track.start?.rotation.slice() || [0, 0, 0],
+    };
+    trackCommit('Place start');
+    toast('Start placed at road height');
+  } else {
+    const p = S.track.start.position,
+      dx = hit.point.x - p[0],
+      dy = hit.point.y - p[1];
+    if (Math.hypot(dx, dy) < 1e-6) return;
+    S.track.start.rotation = [0, Math.atan2(dx, -dy) / DEG, 0];
+    trackCommit('Aim start');
+    toast('Start direction updated');
+  }
+  TRACKVIEW.action = 'select';
+  hint(null);
+  buildTools();
+}
+function trackSnapStart() {
+  if (!S.track.start) throw new Error('Place a start point first');
+  const p = S.track.start.position,
+    box = new THREE.Box3();
+  for (const o of S.objects) if (o.visible) box.expandByObject(o.node);
+  if (box.isEmpty()) throw new Error('No track geometry');
+  const ray = new THREE.Raycaster(new THREE.Vector3(p[0], p[1], box.max.z + 1), new THREE.Vector3(0, 0, -1));
+  const hits = trackHits(ray, true).sort(
+    (a, b) => Math.abs(a.point.z + S.track.clearance - p[2]) - Math.abs(b.point.z + S.track.clearance - p[2]),
+  );
+  if (!hits.length) throw new Error('No drivable surface beneath this X/Y position');
+  p[2] = hits[0].point.z + S.track.clearance;
+}
+function trackFocusBox(box) {
+  if (!box || box.isEmpty()) return;
+  CAM.target.copy(box.getCenter(new THREE.Vector3()));
+  CAM.dist = Math.max(2, box.getSize(new THREE.Vector3()).length() * 1.4);
+  CAM.anim = null;
+  applyCamera();
+}
+function trackFocusMaterial() {
+  const m = trackCurrentMaterial();
+  trackFocusBox(TRACKVIEW.labels.find((g) => g.material.id === m?.id)?.box);
+}
+function trackFocusStart() {
+  if (!S.track.start) return;
+  CAM.target.fromArray(S.track.start.position);
+  CAM.anim = null;
+  applyCamera();
+}
+function openKCL() {
+  openSheet('KCL · Material collision', buildKCL, { panel: true, kind: 'kcl' });
+}
+function buildKCL(body) {
+  const ms = trackMaterials(),
+    m = trackCurrentMaterial();
+  body.append(
+    h(
+      'p',
+      { class: 'muted' },
+      'Every face using a material shares its collision type. Hidden objects and disabled materials are excluded. Tap a surface to pick its material.',
+    ),
+  );
+  if (!m) {
+    body.append(h('p', {}, 'Assign a material to your mesh in Model first.'));
+    return;
+  }
+  TRACKVIEW.material = m.id;
+  const flag = m.kclFinish ? 0 : (m.kclFlag ?? 0),
+    f = decodeKCLFlag(flag),
+    type = KCL_TYPES[f.type];
+  const change = (patch) => {
+    Object.assign(m, patch);
+    trackCommit('Collision · ' + m.name);
+  };
+  const c = h(
+    'div',
+    { class: 'card' },
+    field(
+      'Material',
+      selectInput(
+        m.id,
+        ms.map((m) => [m.id, m.name]),
+        (id) => {
+          TRACKVIEW.material = +id;
+          trackRefresh();
+          refreshSheet(true);
+        },
+        'Collision material',
+      ),
+    ),
+    trackButton('Focus this material', trackFocusMaterial),
+    checkInput('Include in KCL', m.kclEnabled !== false, (v) => change({ kclEnabled: v })),
+    h('b', { id: 'collisionFlag' }, kclHex(flag) + ' · ' + (m.kclFinish ? 'Finish line (normal road)' : type.name)),
+  );
+  c.append(
+    h(
+      'div',
+      { class: 'row' },
+      ...[
+        [0, 'Road'],
+        [6, 'Boost panel'],
+        [7, 'Boost ramp'],
+        [3, 'Off-road'],
+        [12, 'Wall'],
+      ].map(([flag, name]) => trackButton(name, () => change({ kclFlag: flag, kclFinish: false, kclEnabled: true }))),
+      trackButton('Finish line', () => change({ kclFlag: 0, kclFinish: true, kclEnabled: true })),
+    ),
+  );
+  c.append(
+    field(
+      'Base type',
+      selectInput(
+        f.type,
+        KCL_TYPES.map((t) => [t.id, kclHex(t.id) + ' · ' + t.name]),
+        (id) =>
+          change({
+            kclFlag: encodeKCLFlag({ ...f, type: +id, variant: 0, trick: [7, 8, 19].includes(+id) ? false : f.trick }),
+            kclFinish: false,
+          }),
+        'KCL base type',
+      ),
+    ),
+    field(
+      'Variant',
+      selectInput(
+        f.variant,
+        type.variants.map((n, i) => [i, i + ' · ' + n]),
+        (v) => change({ kclFlag: encodeKCLFlag({ ...f, variant: +v }), kclFinish: false }),
+        'KCL variant',
+      ),
+    ),
+  );
+  if (type.note) c.append(h('p', { class: 'muted' }, type.note));
+  if (m.kclFinish)
+    c.append(
+      h(
+        'p',
+        { class: 'muted' },
+        'Editor marker only. Exports Road 0x0000; a real lap gate belongs in KMP checkpoints. The label stays visible in KCL and KMP.',
+      ),
+    );
+  c.append(
+    field(
+      'BLIGHT / effect index',
+      selectInput(
+        f.blight,
+        Array.from({ length: 8 }, (_, i) => [i, i]),
+        (v) => change({ kclFlag: encodeKCLFlag({ ...f, blight: +v }), kclFinish: false }),
+        'KCL BLIGHT index',
+      ),
+    ),
+    field(
+      'Wheel depth',
+      selectInput(
+        f.depth,
+        [0, 1, 2, 3].map((i) => [i, i]),
+        (v) => change({ kclFlag: encodeKCLFlag({ ...f, depth: +v }), kclFinish: false }),
+        'KCL wheel depth',
+      ),
+    ),
+    ...[
+      ['trick', 'Trickable'],
+      ['reject', 'Reject road'],
+      ['soft', 'Soft wall'],
+    ].map(([key, label]) =>
+      checkInput(label, f[key], (v) => change({ kclFlag: encodeKCLFlag({ ...f, [key]: v }), kclFinish: false })),
+    ),
+  );
+  const raw = h('input', { 'aria-label': 'Raw KCL flag', type: 'text', value: kclHex(flag), maxlength: 6 });
+  raw.addEventListener('change', () => {
+    const s = raw.value.trim();
+    if (!/^(?:0x)?[0-9a-f]{1,4}$/i.test(s)) {
+      raw.value = kclHex(flag);
+      toast('Enter a hexadecimal flag from 0000 to FFFF', true);
+      return;
+    }
+    change({ kclFlag: parseInt(s.replace(/^0x/i, ''), 16), kclFinish: false });
+  });
+  c.append(field('Raw hexadecimal flag', raw));
+  body.append(
+    c,
+    h(
+      'div',
+      { class: 'card' },
+      trackScaleField(),
+      h('p', { class: 'muted' }, 'Shared by BRRES, KCL and KMP. Changing scale requires re-exporting all three.'),
+      trackButton('Export & Send KCL…', () => trackExport('kcl'), true),
+      trackButton('Road type list', openKCLCatalog),
+      trackButton('Send material assignments CSV', () =>
+        shareOrDownload('collision-materials.csv', new Blob([trackAssignmentsCSV()], { type: 'text/csv' })),
+      ),
+    ),
+  );
+}
+function trackAssignmentsCSV() {
+  const rows = [['material', 'enabled', 'editor_label', 'flag', 'type', 'variant']];
+  for (const m of trackMaterials()) {
+    const flag = m.kclFinish ? 0 : (m.kclFlag ?? 0),
+      f = decodeKCLFlag(flag);
+    rows.push([
+      m.name,
+      m.kclEnabled !== false,
+      m.kclFinish ? 'Finish line' : '',
+      kclHex(flag),
+      KCL_TYPES[f.type].name,
+      KCL_TYPES[f.type].variants[f.variant],
+    ]);
+  }
+  return rows.map((r) => r.map((v) => '"' + String(v).replace(/"/g, '""') + '"').join(',')).join('\r\n');
+}
+function openKCLCatalog() {
+  openSheet('KCL · All road & collision types', (body) => {
+    const search = h('input', {
+        type: 'search',
+        placeholder: 'Search road, boost, wall…',
+        'aria-label': 'Search collision types',
+      }),
+      list = h('div', { class: 'trackCatalog' });
+    const render = () => {
+      list.replaceChildren();
+      for (const t of KCL_TYPES.filter((t) =>
+        (t.name + ' ' + t.variants.join(' ') + ' ' + kclHex(t.id)).toLowerCase().includes(search.value.toLowerCase()),
+      ))
+        list.append(
+          h(
+            'details',
+            { class: 'card' },
+            h('summary', {}, kclHex(t.id) + ' · ' + t.name),
+            h('p', { class: 'muted' }, t.note || 'Choose a variant below; unknown values are marked.'),
+            ...t.variants.map((n, i) => h('div', {}, kclHex(t.id | (i << 5)) + ' · ' + i + ' · ' + n)),
+          ),
+        );
+    };
+    search.addEventListener('input', render);
+    render();
+    body.append(
+      search,
+      trackButton('Export & Send type list CSV…', () =>
+        shareOrDownload('mkw-kcl-types.csv', new Blob([kclCatalogCSV()], { type: 'text/csv' })),
+      ),
+      h(
+        'p',
+        { class: 'muted' },
+        '32 base types · 8 variants each. Extra bits: BLIGHT 8–10, depth 11–12, trick 13, reject 14, soft wall 15.',
+      ),
+      h(
+        'a',
+        { href: 'https://mkwiiki.org/wiki/KCL_flag', target: '_blank', rel: 'noopener' },
+        'Full flag reference and track-slot effects',
+      ),
+      list,
+    );
+  });
+}
+function openKMP() {
+  openSheet('KMP · Start point', buildKMP, { panel: true, kind: 'kmp' });
+}
+function buildKMP(body) {
+  const start = S.track.start;
+  const c = h(
+    'div',
+    { class: 'card' },
+    h('h3', {}, 'Start position · KTPT'),
+    h(
+      'p',
+      { class: 'muted' },
+      'Place Start, then tap the road. Height snaps to that surface. Aim Start, then tap ahead to set the driving direction.',
+    ),
+    h(
+      'div',
+      { class: 'row' },
+      trackButton('Place Start', () => trackAction('place'), true),
+      trackButton('Aim Start', () => trackAction('aim')),
+    ),
+    field(
+      'Height above surface',
+      numInput(
+        S.track.clearance,
+        (v) => {
+          S.track.clearance = v;
+          trackCommit('Start clearance');
+        },
+        { min: 0, max: 100, label: 'Start clearance' },
+      ),
+    ),
+  );
+  if (start) {
+    c.append(
+      xyzField('Editor position (Z is height)', start.position, (values, axis) => {
+        const prev = start.position;
+        start.position = values;
+        try {
+          if (axis !== 2) trackSnapStart();
+          trackCommit('Move start');
+        } catch (e) {
+          start.position = prev;
+          toast(e.message, true);
+          refreshSheet(true);
+        }
+      }),
+      field(
+        'Driving direction (Wii yaw °)',
+        numInput(
+          start.rotation[1],
+          (v) => {
+            start.rotation[1] = v;
+            trackCommit('Rotate start');
+          },
+          { label: 'Start yaw' },
+        ),
+      ),
+      trackButton('Snap height again', () => {
+        try {
+          trackSnapStart();
+          trackCommit('Snap start height');
+        } catch (e) {
+          toast(e.message, true);
+        }
+      }),
+      h(
+        'p',
+        { class: 'muted' },
+        'Wii position X / Y / Z: ' +
+          trackToWii(start.position, S.track.scale)
+            .map((v) => fmt(v, 2))
+            .join(' / '),
+      ),
+      h(
+        'p',
+        { class: 'muted' },
+        '0° points toward editor −Y; 90° toward +X. Multiples of 90° avoid the vanilla minimap start-line bug.',
+      ),
+    );
+  }
+  body.append(
+    c,
+    h(
+      'div',
+      { class: 'card' },
+      h('h3', {}, 'KMP file'),
+      trackScaleField(),
+      trackButton('Open existing KMP…', () => $('#fileKMP').click()),
+      h(
+        'p',
+        { id: 'kmpTemplate', class: 'muted' },
+        S.track.template
+          ? 'Updating: ' +
+              S.track.templateName +
+              '. Only the first KTPT position/rotation changes; other entries and sections are preserved.'
+          : 'Automatic Time Trials test setup: adds temporary linked routes, four checkpoints, cameras and a respawn at Start. No lap drawing needed. These placeholder routes are not fitted to your track; build race routes later. Or open a working KMP from your own track package.',
+      ),
+      S.track.template
+        ? trackButton('Use automatic test setup', () => {
+            S.track.template = null;
+            S.track.templateName = '';
+            trackCommit('Automatic KMP setup');
+          })
+        : null,
+      trackButton('Export & Send KMP…', () => trackExport('kmp'), true),
+      h(
+        'p',
+        { class: 'muted' },
+        'In-game testing still needs course.kcl, course_model.brres and a suitable SZS track package. Existing routes/checkpoints are preserved, not fitted to your new mesh. Full checkpoint/route editing and SZS packaging are not included yet.',
+      ),
+    ),
+  );
+}
+$('#fileKMP').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  try {
+    if (file.size > 8 * 1024 * 1024) throw new Error('KMP file is too large');
+    const bytes = new Uint8Array(await file.arrayBuffer()),
+      parsed = inspectKMP(bytes);
+    S.track.template = b64FromBytes(bytes);
+    S.track.templateName = file.name;
+    if (parsed.start)
+      S.track.start = { position: trackFromWii(parsed.start.position, S.track.scale), rotation: parsed.start.rotation };
+    trackCommit('Open KMP');
+    openKMP();
+  } catch (e) {
+    toast(e.message, true);
+  }
+});
+function trackExport(kind) {
+  try {
+    let bytes,
+      report = '';
+    if (kind === 'kcl') {
+      const result = exportKCL(trackTriangles());
+      bytes = result.bytes;
+      report =
+        'KCL: ' +
+        result.triangleCount +
+        ' triangles' +
+        (result.skipped ? ' · ' + result.skipped + ' degenerate triangles skipped' : '');
+    } else
+      bytes = exportKMP(S.track.start, {
+        scale: S.track.scale,
+        template: S.track.template ? bytesFromB64(S.track.template) : null,
+      });
+    shareOrDownload('course.' + kind, new Blob([bytes], { type: 'application/octet-stream' }));
+    if (report) toast(report);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 
 // ==== app_ui.js ====
 // ============================================================================
@@ -8994,6 +10334,7 @@ const PIVOT = [['median', 'Median Point'], ['bounds', 'Bounding Box'], ['individ
 function buildSubbar() {
   const bar = $('#sub');
   bar.innerHTML = '';
+  if (trackSubbar(bar)) return;
   const chip = (lbl, val, run, opts = {}) => {
     const b = h('button', { class: 'chip' + (opts.on ? ' on' : ''), 'aria-label': opts.aria || lbl }, opts.icon ? h('span', { html: icon(opts.icon), style: { display: 'grid' } }) : null, lbl ? h('span', { class: 'lbl' }, lbl) : null, val ? h('span', {}, val) : null);
     b.addEventListener('click', run);
@@ -9026,10 +10367,10 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  for (const t of TOOLS3D) {
+  for (const t of (S.workspace === 'model' ? TOOLS3D : S.workspace === 'kcl' ? [['select','select','Pick collision material']] : [['place','cursor','Place Start'],['aim','rotate','Aim Start']])) {
     if (!t) { col.append(h('hr')); continue; }
-    const b = h('button', { class: S.tool === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    const b = h('button', { class: (S.workspace === 'kmp' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
+    b.addEventListener('click', () => { if (S.workspace === 'kmp') { trackAction(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
@@ -9158,6 +10499,7 @@ function shelfBtn(label, ic, run, sub = false) {
 }
 function buildShelf() {
   const sh = $('#shelf'); sh.innerHTML = '';
+  if (buildTrackShelf(sh)) return;
   const g = () => h('span', { class: 'grp' });
   if (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')) {
     sh.append(
@@ -9348,6 +10690,9 @@ function menuFile() {
     { label: 'New Scene', icon: 'file', desc: 'Start over with a cube', run: confirmNew },
     { label: 'Open Project…', icon: 'folder', desc: 'A .pocketmesh.json file', run: () => $('#fileProj').click() },
     { label: 'Save Project', icon: 'save', desc: 'Save to Files, iCloud Drive, AirDrop…', run: saveProjectFile },
+    { group: 'Track workspaces' },
+    { label: 'KCL Editor', icon: 'layers', run: () => { setWorkspace('kcl'); openKCL(); } },
+    { label: 'KMP Editor', icon: 'cursor', run: () => { setWorkspace('kmp'); openKMP(); } },
     { group: 'Exchange' },
     { label: 'BRRES Editor…', icon: 'folder', desc: 'Inspect resources, preview and resize textures', run: openBRRESEditor },
     { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
@@ -9375,6 +10720,7 @@ function newScene() {
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
   S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
+  S.track = normalizeTrack();
   S.cursor.set(0, 0, 0); S.ruler = normalizeRuler(); rulerResetPending();
   const mat = newMaterial('Material', '#c9ccd2');
   const o = createObject('Cube', primCube(), { materials: [mat.id] });
@@ -9708,14 +11054,14 @@ function buildExport(body) {
     checkInput('Always wrap in a .zip', st.zip, (v) => { st.zip = v; save(); }));
   if (st.fmt === 'brres') opts.append(
     h('p', { class: 'muted', id: 'brresScope' }, `${selectedOnly && anySel ? 'Selected visible objects' : 'All visible objects'}: ${S.objects.filter((o) => o.visible && (!(selectedOnly && anySel) || o.selected)).length}. Includes their assigned materials and image textures together in one BRRES. Color-only materials are included too.`),
-    field('Wii units per model unit', numInput(st.scale ?? 1, (v) => { st.scale = v; save(); }, { min: 0.001, max: 100000 })),
+    field('Wii units per model unit', numInput(S.track.scale, (v) => { st.scale = v; save(); setTrackScale(v); }, { min: 0.001, max: 100000 })),
     field('Maximum texture size', selectInput(st.textureSize || 512, [64, 128, 256, 512, 1024].map((v) => [v, v + ' px']), (v) => { st.textureSize = +v; save(); }, 'BRRES texture size')),
     h('p', { class: 'muted' }, 'Exports evaluated modifiers, applies transforms and converts Z-up to Wii Y-up. Textures are resized to power-of-two dimensions and embedded as RGBA8. Basic unlit color/texture, cutout and alpha blend are supported; PBR lighting and metallic effects are not exported.'));
   const go = h('button', { class: 'btn primary', style: { height: '46px', fontSize: '17px', justifyContent: 'center' } }, h('span', { html: icon('export') }), st.fmt === 'brres' ? 'Export & Send BRRES…' : 'Export & Save…');
   go.addEventListener('click', () => {
     try {
       const base = safeFileName(nameIn.value, 'model');
-      const r = runExport(st.fmt, { selectedOnly: selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
+      const r = runExport(st.fmt, { selectedOnly: selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: S.track.scale, textureSize: st.textureSize });
       shareOrDownload(r.name, r.data);
       const kb = (r.data.length || r.data.byteLength || 0) / 1024;
       $('#exportInfo').textContent = `${r.name} · ${kb > 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(kb)) + ' KB'}${r.count > 1 ? ` · ${r.count} files inside` : ''}`;
@@ -9802,6 +11148,7 @@ hideRedoPanel = () => { $('#redo').hidden = true; };
 
 // ---------- hooks ----------
 onSelectionChanged = () => {
+  trackRefresh();
   for (const o of S.objects) refreshOverlays(o);
   refreshOriginDots();
   updateStats();
@@ -9812,7 +11159,7 @@ onSelectionChanged = () => {
 onModeChanged = () => {
   buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
-  $('#selModes').hidden = S.mode !== 'edit';
+  $('#selModes').hidden = S.workspace !== 'model' || S.mode !== 'edit';
   for (const b of document.querySelectorAll('#selModes button')) b.classList.toggle('on', b.dataset.sm === S.selectMode);
   buildShelf();
   refreshSheet();
@@ -9832,7 +11179,7 @@ const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastT
 function cancelHold() { clearTimeout(G.holdTimer); G.holdTimer = null; }
 function beginHold(e, p) {
   cancelHold();
-  if (e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
   const object = S.active, mode = S.mode, selectMode = S.selectMode;
   G.holdTimer = setTimeout(() => {
     if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
@@ -9961,6 +11308,7 @@ document.addEventListener('gesturechange', (e) => e.preventDefault());
 
 function handleTap(x, y, ptype) {
   if (TF.active || PM.active) return;
+  if (S.workspace !== 'model') { trackTap(x,y); return; }
   const radius = ptype === 'mouse' ? 14 : 28;
   if (S.pendingTap === 'loopcut') { loopCutAt(x, y); return; }
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
@@ -10132,6 +11480,7 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Numpad5') { toggleOrtho(); return; }
     if (e.code === 'NumpadDecimal') { frameSelected(); return; }
   }
+  if (S.workspace !== 'model') { if (k === 'Escape') { TRACKVIEW.action = 'select'; hint(null); } return; }
   const edit = S.mode === 'edit';
   const lk = k.toLowerCase();
   if (k === 'Tab') { e.preventDefault(); setMode(edit ? 'object' : 'edit'); return; }
@@ -10222,7 +11571,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

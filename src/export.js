@@ -366,6 +366,7 @@ function _exPrepare(scene, o) {
       texture: tex,
       alphaMode: s?.alphaMode || 'auto', alphaCutoff: s?.alphaCutoff == null ? 0.5 : _exClamp01(s.alphaCutoff), doubleSided: s?.doubleSided !== false, wrap: s?.wrap || 'repeat',
       filter: s?.texture?.filter === 'nearest' ? 'nearest' : 'linear',
+      kclFlag: s?.kclFlag ?? 0, kclEnabled: s?.kclEnabled !== false, kclFinish: !!s?.kclFinish,
       index: materials.length,
     };
     materials.push(m);

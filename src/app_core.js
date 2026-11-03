@@ -111,6 +111,7 @@ const S = {
   snap: false, snapMove: 0.1, snapRot: 5, snapScale: 0.1,
   prop: false, propRadius: 1, propFalloff: 'smooth',
   shading: 'solid', xray: false, faceOrient: false, view: '3d',
+  workspace: 'model', track: normalizeTrack(),
   cursor: new THREE.Vector3(), ruler: normalizeRuler(),
   uvSel: new Set(), uvTool: 'select', uvStretch: false,
 };
@@ -858,7 +859,7 @@ function snapshot() {
     })),
     materials: S.materials.map((m) => ({ ...m })),
     active: S.active ? S.active.id : null, mode: S.mode, selectMode: S.selectMode,
-    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel), ruler: normalizeRuler(S.ruler),
+    cursor: S.cursor.toArray(), uvSel: new Set(S.uvSel), ruler: normalizeRuler(S.ruler), track: normalizeTrack(S.track),
   };
 }
 function restore(snap) {
@@ -883,9 +884,10 @@ function restore(snap) {
   S.objects = next;
   S.materials = snap.materials.map((m) => ({ ...m }));
   S.active = S.objects.find((o) => o.id === snap.active) || null;
-  S.mode = snap.mode === 'edit' && S.active ? 'edit' : 'object';
+  S.mode = S.workspace === 'model' && snap.mode === 'edit' && S.active ? 'edit' : 'object';
   S.selectMode = snap.selectMode;
   S.cursor.fromArray(snap.cursor);
+  S.track = normalizeTrack(snap.track);
   S.ruler = normalizeRuler(snap.ruler); rulerResetPending();
   S.uvSel = new Set(snap.uvSel);
   for (const o of S.objects) rebuildObject(o);
@@ -962,4 +964,5 @@ function frame(now) {
   renderer.render(scene, camera);
   drawNav();
   drawRuler();
+  drawTrack();
 }

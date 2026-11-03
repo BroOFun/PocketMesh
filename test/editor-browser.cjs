@@ -63,7 +63,7 @@ const {chromium,devices}=require('playwright');
   await page.screenshot({path:path.join(out,`brres-${mobile?'mobile':'desktop'}.png`)});
   const downloadPromise=page.waitForEvent('download');await page.getByRole('button',{name:'Save & Send BRRES…',exact:true}).click();const download=await downloadPromise;
   const savedPath=path.join(out,`edited-${mobile?'mobile':'desktop'}.brres`);await download.saveAs(savedPath);
-  await page.locator('#fileBRRES').setInputFiles(savedPath);await page.getByText('32 × 16 px · RGB5A3 (5)',{exact:true}).waitFor();
+  await page.locator('#fileBRRES').setInputFiles(savedPath);await page.waitForFunction(name=>__pm.BRED.name===name,path.basename(savedPath));await page.getByText('32 × 16 px · RGB5A3 (5)',{exact:true}).waitFor();
   assert.equal(await page.evaluate(()=>__pm.BRED.archive.textures[0].mipCount),6);
   // Malformed uploads leave the previously open archive available.
   await page.locator('#fileBRRES').setInputFiles({name:'bad.brres',mimeType:'application/octet-stream',buffer:Buffer.from('bad')});

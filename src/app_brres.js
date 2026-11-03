@@ -52,7 +52,7 @@ function buildBRRESMaterial(body, material) {
 }
 function buildBRRESEditor(body) {
   body.append(h('div',{class:'row'},h('button',{class:'btn primary',onclick:() => $('#fileBRRES').click()},'Open BRRES…'),h('button',{class:'btn',onclick:() => {
-    try { const file = runExport('brres',{baseName:'course_model',scale:1,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
+    try { const file = runExport('brres',{baseName:'course_model',scale:S.track.scale,textureSize:512,selectedOnly:false,zip:false}); loadBRRESEditor(file.data,file.name); } catch (e) { brresEditorError(e); }
   }},'Use current scene')));
   if (BRED.error) body.append(h('p',{class:'brres-error',role:'alert'},BRED.error));
   const a = BRED.archive;
