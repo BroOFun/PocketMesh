@@ -274,8 +274,12 @@ function menuShading() {
     ...SHADES.map(([k, ic, l, d]) => ({ label: l, icon: ic, desc: d + (S.shading === k ? ' · current' : ''), run: () => setShading(k) })),
     { group: 'Overlays' },
     { label: S.xray ? 'X-ray: on' : 'X-ray: off', icon: 'xray', desc: 'See and select through the mesh', run: () => $('#btnXray').click() },
-    { label: S.faceOrient ? 'Face orientation: on' : 'Face orientation: off', icon: 'normals', desc: 'Blue = front, red = back', run: () => { S.faceOrient = !S.faceOrient; refreshMaterials(); } },
+    { label: S.faceOrient ? 'Backface overlay: on' : 'Backface overlay: off', icon: 'normals', desc: 'Subtle red = back · front faces keep their appearance', run: () => setBackfaceOverlay(!S.faceOrient) },
   ]);
+}
+function setBackfaceOverlay(enabled) {
+  S.faceOrient = !!enabled; settingsSet('backfaceOverlay', S.faceOrient);
+  refreshAllObjects(); refreshSheet(); requestRender();
 }
 function buildShadebar() { const b = $('#btnShade'); if (b) b.innerHTML = icon(SHADES.find((x) => x[0] === S.shading)[1]); }
 function setShading(k) {
@@ -895,7 +899,7 @@ function openSettings(focus) {
         : 'One finger orbits. Two fingers: drag to pan, pinch to zoom, twist to turn the view.'));
     const view = h('div', { class: 'card' }, h('h3', {}, 'Viewport'),
       checkInput('Show floor grid', S.showGrid, (v) => { S.showGrid = v; gridGroup.visible = v && S.shading !== 'rendered'; settingsSet('grid', v); requestRender(); }),
-      checkInput('Face orientation (blue = front, red = back)', S.faceOrient, (v) => { S.faceOrient = v; refreshMaterials(); }),
+      checkInput('Backface overlay (subtle red)', S.faceOrient, setBackfaceOverlay),
       field('UV layout size', selectInput(settingsGet('uvLayoutSize', 1024), [[512, '512 px'], [1024, '1024 px'], [2048, '2048 px'], [4096, '4096 px']], (v) => settingsSet('uvLayoutSize', +v), 'UV layout size')));
     body.append(...(focus === 'prop' ? [prop, nav, snap, view] : [nav, snap, prop, view]));
     body.append(h('p', { class: 'muted', style: { margin: '2px 4px' } }, 'PocketMesh 1.0 · works offline · your scene autosaves on this device.'));
@@ -1350,6 +1354,7 @@ function loadSettings() {
   S.snapMove = settingsGet('snapMove', 0.1); S.snapRot = settingsGet('snapRot', 5); S.snapScale = settingsGet('snapScale', 0.1);
   S.propRadius = settingsGet('propRadius', 1); S.propFalloff = settingsGet('propFalloff', 'smooth');
   S.shading = settingsGet('shading', 'solid');
+  S.faceOrient = settingsGet('backfaceOverlay', true) !== false;
   S.showGrid = settingsGet('grid', true);
   S.navStyle = settingsGet('navStyle', 'modeler');
 }
@@ -1385,7 +1390,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

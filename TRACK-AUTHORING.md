@@ -34,6 +34,19 @@ or updating the first start point in an existing KMP. Full race authoring still 
   opaque/cutout/blend alpha, a cutout threshold and double-sided rendering.
   Texture filtering and Repeat/Extend are independent for each material.
 
+## Backface overlay
+
+Backfaces have a subtle red tint by default; front faces keep their normal
+materials and textures. It works in Model, KCL and KMP, in Object and Edit Mode.
+In wireframe, backs get a faint red fill while front faces remain unfilled.
+Single-sided materials temporarily show their backfaces while the overlay is on.
+This is a viewport aid and does not change material sidedness, normals or exports.
+
+Toggle **Viewport Shading → Backface overlay: on/off**, or use **Settings →
+Viewport → Backface overlay (subtle red)**. Your choice is remembered on this
+device, including when reopening the app or loading a project. To fix a red face,
+select it in Edit Mode and use **Shading → Flip Normals** or **Recalculate Outside**.
+
 ## Ruler
 
 Tap the **ruler icon** in the left toolbar, then tap two endpoints. Vertices are
@@ -315,12 +328,16 @@ npm test
 npx playwright install chromium
 npm run test:track:browser
 npm run test:editor:browser
+npm run test:backfaces:browser
 npm run test:materials:browser
 npm ci --prefix test
 npm run test:export --prefix test
 ```
 
-The browser tests start their own local servers. The editor test covers desktop
+The browser tests start their own local servers. The backface test compares
+rendered front/back pixels in desktop and emulated-iPhone layouts, checks lit
+and textured materials, wireframe, edit/workspace views, single-sided visibility,
+flip/undo, saved toggle preferences and byte-identical BRRES exports. The editor test covers desktop
 and iPhone touch emulation, vertex/edge snapping in world units, measurement
 settings/persistence/undo, texture resize/format/mipmap controls, download/reopen,
 replacement images, larger appended textures, malformed-file errors and revert.
