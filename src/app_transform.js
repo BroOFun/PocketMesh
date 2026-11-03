@@ -246,6 +246,7 @@ function updateGuide(t) {
   requestRender();
 }
 function tfStart(kind, opts = {}) {
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();
   const st = tfBuildState(kind);
   if (!st) { toast(S.mode === 'edit' ? 'Select some geometry first' : 'Select an object first', true); return false; }

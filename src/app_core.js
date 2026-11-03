@@ -29,6 +29,7 @@ function h(tag, attrs = {}, ...kids) {
 
 // ---------- icons ----------
 const ICONS = {
+  knife: '<path d="m14 3 7 7-8 8-4-4z"/><path d="m9 14-6 7 8-3M12 5l7 7"/>',
   ruler: '<path d="m3 16 13-13 5 5L8 21zM7 12l2 2m2-6 2 2m2-6 2 2"/>',
   menu: '<path d="M4 6.5h16M4 12h16M4 17.5h16"/>',
   undo: '<path d="M9 13.5 4.5 9 9 4.5"/><path d="M4.5 9H14a5.5 5.5 0 0 1 0 11h-3"/>',
@@ -896,6 +897,7 @@ function snapshot() {
   };
 }
 function restore(snap) {
+  knifeReset();
   const keep = new Map(S.objects.map((o) => [o.id, o]));
   const next = [];
   for (const so of snap.objects) {
@@ -997,5 +999,6 @@ function frame(now) {
   renderer.render(scene, camera);
   drawNav();
   drawRuler();
+  drawKnife();
   drawTrack();
 }

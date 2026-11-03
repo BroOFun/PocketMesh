@@ -38,6 +38,7 @@ function openTrackEditor() {
 }
 function setWorkspace(workspace) {
   if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
+  if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
   closeSheet();
