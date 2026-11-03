@@ -51,6 +51,11 @@ input, select { font: inherit; color: var(--fg); }
 #top { overflow: hidden; border-bottom: 1px solid #0c0d10; padding-top: max(6px, env(safe-area-inset-top, 0px)); }
 #sub { padding-block: 4px 6px; overflow-x: auto; scrollbar-width: none; border-bottom: 1px solid var(--line); }
 #sub::-webkit-scrollbar { display: none; }
+#sub > .segrow { display: flex; flex-wrap: nowrap; flex: 0 0 auto; gap: 3px; }
+#sub > .segrow button { padding: 5px 11px; min-height: 32px; }
+#sub > .btn { flex: 0 0 auto; white-space: nowrap; }
+.trackCatalog summary { cursor: pointer; font-weight: 600; }
+.trackCatalog details > div { padding: 6px 0; font-size: 13px; }
 .spacer { flex: 1; }
 .ib { width: 36px; height: 36px; display: inline-grid; place-items: center; border: 0; border-radius: var(--r); background: transparent; cursor: pointer; flex: none; }
 .ib svg { width: 21px; height: 21px; }
@@ -244,6 +249,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
     <section class="pane" id="pane3d">
       <canvas class="view" id="c3d"></canvas>
       <canvas class="view" id="rulerCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
+      <canvas class="view" id="trackCanvas" aria-hidden="true" style="pointer-events:none"></canvas>
       <div class="ovl" id="stats"></div>
       <div class="ovl toolcol" id="tools"></div>
       <div class="ovl" id="navwrap"><canvas id="nav" width="184" height="184"></canvas><div class="navbtns" id="navbtns"></div></div>
@@ -269,6 +275,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
   <input type="file" id="fileProj" accept=".json,application/json" hidden>
   <input type="file" id="fileObj" multiple hidden>
   <input type="file" id="fileMat" multiple hidden>
+  <input type="file" id="fileKMP" accept=".kmp" hidden>
   <input type="file" id="fileBRRES" accept=".brres" hidden>
   <input type="file" id="fileBRRESTexture" accept="image/*" hidden>
 </div>

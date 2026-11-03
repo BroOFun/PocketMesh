@@ -1,9 +1,10 @@
-# Basic track authoring and BRRES export
+# Track workspaces and BRRES / KCL / KMP export
 
-PocketMesh can build, texture, subdivide and export a **visual track model** as
-`course_model.brres`. This is the first authoring milestone, not a complete
-Mario Kart Wii course builder. A BRRES does not contain collision, checkpoints,
-item/enemy routes, starting positions, respawns or the course archive.
+PocketMesh shares one model and camera between **Model**, **KCL** and **KMP**
+workspaces. It exports `course_model.brres`, `course.kcl` and `course.kmp`.
+The KMP editor supports a start point and automatic drive-test scaffolding,
+or updating the first start point in an existing KMP. Full race authoring and
+SZS packaging still require other tools.
 
 ## Editing
 
@@ -47,7 +48,7 @@ Measurements use world coordinates, including object scale, and default to
 **meters** with **1 modeling unit = 1 meter**. **Ruler → Settings** changes the
 display unit (m/cm/mm/ft), meters per unit, and snapping. For coordinates stored
 in centimeters, choose `0.01` meters per unit. This changes measurement display;
-it does not resize the model or change the separate BRRES export scale.
+it does not resize the model or change the shared Wii export scale (BRRES, KCL and KMP).
 
 Completed measurements remain visible and are saved in the project/autosave.
 They support Undo/Redo and individual deletion or clearing in Ruler Settings.
@@ -138,12 +139,100 @@ this exporter's material appearance.
   sets, arbitrary shader graphs, game lighting, normal maps or PBR conversion.
   Lit/PBR materials export as unlit color/texture. Loose edges/points are omitted.
 
-A playable track additionally needs appropriate **KCL collision**, **KMP race
-configuration**, associated model resources (such as the minimap/sky when used),
-and correct **SZS packaging** for its replacement slot. These are not generated
-by this change. Noclip is a visual viewer, not a Mario Kart race simulation;
-opening a model there cannot confirm collision, checkpoints or race behavior.
-[Wiimm's SZS Tools](https://szs.wiimm.de/) provides tools for these course files.
+## KCL workspace
+
+Use the **Model / KCL / KMP** buttons in the option bar, or File → KCL Editor.
+The viewport, materials and camera are shared. Drag/pinch navigation works as
+before; tapping a surface selects its material in the collision panel.
+
+- Choose any of the **32 base types**, any variant (0–7), BLIGHT/effect index,
+  wheel depth, trickable, reject-road and soft-wall bits. Raw hexadecimal flags
+  are supported. Road, boost panel/ramp, off-road and wall presets speed this up.
+- **Finish line** stores an editor label and exports normal road `0x0000`.
+  Its white marker remains visible in KMP. It does not itself define a lap gate.
+- **Include in KCL** can exclude scenery or decals. Hidden objects are omitted.
+  The assignment affects every face using that material, including other objects.
+  Split the material in Model if those faces need different collision behavior.
+- **Focus this material** frames its geometry. **Colors On/Off** controls the
+  collision tint over the existing rendered model, preserving textures.
+- **Road type list** lists all 256 base-type/variant combinations, with search,
+  expandable entries and CSV export. Unknown and track-slot-dependent effects
+  are marked. A second CSV export lists the project's material assignments.
+- **Export & Send KCL** writes binary Wii collision: transformed, triangulated,
+  evaluated meshes, normalized prisms and a conservative octree. Limits are
+  65,535 prisms, 65,536 vectors per pool and a 64 MB octree. Degenerate triangles
+  are skipped and reported. Surface winding determines collision direction.
+
+This version authors collision from the shared scene; importing arbitrary KCL
+files and editing their existing prism/octree structures is not included.
+Moving water, conveyors, cannons, sound/effect triggers and some variants also
+need the appropriate KMP objects/routes, lighting data or track replacement slot.
+Selecting a flag alone does not create those dependencies. Boost ramps and jump
+pads are already trickable; avoid enabling the additional trick flag on them.
+
+## KMP workspace
+
+1. Choose **KMP → Place Start**, then tap a visible drivable surface. The point
+   uses the hit's height (including sloped or raised roads), plus **Height above
+   surface** (default 0.2 model units). Disabled collision and non-road types
+   are excluded from placement.
+2. Choose **Aim Start** and tap ahead on the road, or enter a Wii yaw in degrees.
+   0° points toward editor −Y; 90° points toward +X. Cardinal directions avoid
+   the vanilla minimap start-line rotation issue. The arrow previews the heading.
+3. **Start settings** also exposes coordinates and **Snap height again**.
+   Editing X/Y re-snaps height to the nearest road level to the previous height,
+   so a bridge does not always force the point onto its topmost surface.
+4. Set **Wii units per model unit** consistently. This is now one project setting
+   shared by BRRES/KCL/KMP. Exports convert editor Z-up to Wii Y-up (`x,z,-y`).
+   Previously exported files must be re-exported after changing this scale.
+5. Tap **Export & Send KMP**. With no imported KMP, PocketMesh creates an original
+   temporary test setup: linked enemy/item paths, four checkpoints, a lap counter,
+   one key checkpoint, respawn at Start, two cameras and stage settings. This
+   avoids empty path sections that can freeze Mario Kart Wii. The loop has a
+   5,000-Wii-unit radius near Start and is a placeholder, not a route fitted to
+   your geometry. Use **Time Trials** for initial driving/collision tests; CPU
+   racing, lap behavior, respawn coverage and route-dependent items need proper
+   routes/checkpoints later. The finish material is only a reference label.
+6. Alternatively, **Open existing KMP** from your own working track package.
+   PocketMesh reads its first start point; export changes only that point's
+   position and rotation. Other KTPT entries, player indices, padding, sections
+   and unknown section data are preserved. The existing routes are not moved to
+   fit a new mesh. **Use automatic test setup** detaches that base file.
+
+Material flags, finish labels, export scale, start position/heading/clearance and
+an imported KMP are included in project save/autosave and Undo/Redo. Workspace
+switching itself does not reset the model, history or camera.
+
+A game test still needs a suitable **SZS track package** with the BRRES, KCL and
+KMP, plus required resources such as minimap/sky and any referenced object files.
+PocketMesh does not build that archive yet. Noclip validates visuals, not racing
+or collision. No Wii/Dolphin gameplay test has been performed for these exports.
+
+### Format and compatibility checks
+
+`npm test` includes all 65,536 flag combinations, prism reconstruction, octree
+lookups around 400 triangles, axis/scale conversion and KMP section preservation.
+`npm run test:workspaces:browser` covers desktop and emulated iPhone workspace
+controls, material assignments, finish labels, surface-height placement, heading,
+file downloads, KMP import and project/undo behavior.
+
+For independent checking with locally downloaded tools and external samples:
+
+```sh
+WIIMM_BIN=/path/to/wiimm/bin RIISTUDIO_SAMPLES=/path/to/RiiStudio/tests/samples node test/track-files.test.mjs
+```
+
+Wiimm v2.42a parses the generated files and reports no KCL or KMP warnings for
+the test fixtures (the intentional item-route loop produces an informational
+hint). These file checks are not an in-game compatibility guarantee.
+
+Sources: [KCL format](https://mkwiiki.org/wiki/KCL_(File_Format)),
+[KCL types and variants](https://mkwiiki.org/wiki/KCL_flag),
+[game collision attribute definitions](https://github.com/doldecomp/mkw/blob/main/src/field/KCollision.hpp),
+[KMP format](https://mkwiiki.org/wiki/KMP_(File_Format)),
+[RiiStudio KMP reader](https://github.com/riidefi/RiiStudio/blob/master/source/librii/kmp/io/KMP.cpp),
+[Wiimm's SZS Tools](https://github.com/Wiimm/wiimms-szs-tools),
+[required course resources](https://mkwiiki.org/wiki/Common_Crash_Causes).
 
 ## Original example
 

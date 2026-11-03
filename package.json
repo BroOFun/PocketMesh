@@ -8,10 +8,11 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/mesh.test.mjs && node test/uv.test.mjs && node test/track.test.mjs && node test/editor.test.mjs",
+    "test": "node test/mesh.test.mjs && node test/uv.test.mjs && node test/track.test.mjs && node test/editor.test.mjs && node test/track-files.test.mjs",
     "test:track:browser": "node test/track-browser.cjs",
     "test:editor:browser": "node test/editor-browser.cjs",
-    "test:materials:browser": "node test/materials-browser.cjs"
+    "test:materials:browser": "node test/materials-browser.cjs",
+    "test:workspaces:browser": "node test/workspaces-browser.cjs"
   },
   "license": "UNLICENSED",
   "dependencies": {

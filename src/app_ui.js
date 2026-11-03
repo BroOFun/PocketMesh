@@ -142,6 +142,7 @@ const PIVOT = [['median', 'Median Point'], ['bounds', 'Bounding Box'], ['individ
 function buildSubbar() {
   const bar = $('#sub');
   bar.innerHTML = '';
+  if (trackSubbar(bar)) return;
   const chip = (lbl, val, run, opts = {}) => {
     const b = h('button', { class: 'chip' + (opts.on ? ' on' : ''), 'aria-label': opts.aria || lbl }, opts.icon ? h('span', { html: icon(opts.icon), style: { display: 'grid' } }) : null, lbl ? h('span', { class: 'lbl' }, lbl) : null, val ? h('span', {}, val) : null);
     b.addEventListener('click', run);
@@ -174,10 +175,10 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  for (const t of TOOLS3D) {
+  for (const t of (S.workspace === 'model' ? TOOLS3D : S.workspace === 'kcl' ? [['select','select','Pick collision material']] : [['place','cursor','Place Start'],['aim','rotate','Aim Start']])) {
     if (!t) { col.append(h('hr')); continue; }
-    const b = h('button', { class: S.tool === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    const b = h('button', { class: (S.workspace === 'kmp' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
+    b.addEventListener('click', () => { if (S.workspace === 'kmp') { trackAction(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   const uc = $('#uvtools'); uc.innerHTML = '';
@@ -306,6 +307,7 @@ function shelfBtn(label, ic, run, sub = false) {
 }
 function buildShelf() {
   const sh = $('#shelf'); sh.innerHTML = '';
+  if (buildTrackShelf(sh)) return;
   const g = () => h('span', { class: 'grp' });
   if (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')) {
     sh.append(
@@ -496,6 +498,9 @@ function menuFile() {
     { label: 'New Scene', icon: 'file', desc: 'Start over with a cube', run: confirmNew },
     { label: 'Open Project…', icon: 'folder', desc: 'A .pocketmesh.json file', run: () => $('#fileProj').click() },
     { label: 'Save Project', icon: 'save', desc: 'Save to Files, iCloud Drive, AirDrop…', run: saveProjectFile },
+    { group: 'Track workspaces' },
+    { label: 'KCL Editor', icon: 'layers', run: () => { setWorkspace('kcl'); openKCL(); } },
+    { label: 'KMP Editor', icon: 'cursor', run: () => { setWorkspace('kmp'); openKMP(); } },
     { group: 'Exchange' },
     { label: 'BRRES Editor…', icon: 'folder', desc: 'Inspect resources, preview and resize textures', run: openBRRESEditor },
     { label: 'Export Model…', icon: 'export', desc: 'BRRES · OBJ · FBX · DAE · glTF', run: openExport },
@@ -523,6 +528,7 @@ function newScene() {
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
   S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
+  S.track = normalizeTrack();
   S.cursor.set(0, 0, 0); S.ruler = normalizeRuler(); rulerResetPending();
   const mat = newMaterial('Material', '#c9ccd2');
   const o = createObject('Cube', primCube(), { materials: [mat.id] });
@@ -856,14 +862,14 @@ function buildExport(body) {
     checkInput('Always wrap in a .zip', st.zip, (v) => { st.zip = v; save(); }));
   if (st.fmt === 'brres') opts.append(
     h('p', { class: 'muted', id: 'brresScope' }, `${selectedOnly && anySel ? 'Selected visible objects' : 'All visible objects'}: ${S.objects.filter((o) => o.visible && (!(selectedOnly && anySel) || o.selected)).length}. Includes their assigned materials and image textures together in one BRRES. Color-only materials are included too.`),
-    field('Wii units per model unit', numInput(st.scale ?? 1, (v) => { st.scale = v; save(); }, { min: 0.001, max: 100000 })),
+    field('Wii units per model unit', numInput(S.track.scale, (v) => { st.scale = v; save(); setTrackScale(v); }, { min: 0.001, max: 100000 })),
     field('Maximum texture size', selectInput(st.textureSize || 512, [64, 128, 256, 512, 1024].map((v) => [v, v + ' px']), (v) => { st.textureSize = +v; save(); }, 'BRRES texture size')),
     h('p', { class: 'muted' }, 'Exports evaluated modifiers, applies transforms and converts Z-up to Wii Y-up. Textures are resized to power-of-two dimensions and embedded as RGBA8. Basic unlit color/texture, cutout and alpha blend are supported; PBR lighting and metallic effects are not exported.'));
   const go = h('button', { class: 'btn primary', style: { height: '46px', fontSize: '17px', justifyContent: 'center' } }, h('span', { html: icon('export') }), st.fmt === 'brres' ? 'Export & Send BRRES…' : 'Export & Save…');
   go.addEventListener('click', () => {
     try {
       const base = safeFileName(nameIn.value, 'model');
-      const r = runExport(st.fmt, { selectedOnly: selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: st.scale, textureSize: st.textureSize });
+      const r = runExport(st.fmt, { selectedOnly: selectedOnly && anySel, applyTransforms: st.applyTransforms, triangulate: st.triangulate, yUp: st.yUp, zip: st.zip, baseName: base, scale: S.track.scale, textureSize: st.textureSize });
       shareOrDownload(r.name, r.data);
       const kb = (r.data.length || r.data.byteLength || 0) / 1024;
       $('#exportInfo').textContent = `${r.name} · ${kb > 1024 ? (kb / 1024).toFixed(1) + ' MB' : Math.max(1, Math.round(kb)) + ' KB'}${r.count > 1 ? ` · ${r.count} files inside` : ''}`;
@@ -950,6 +956,7 @@ hideRedoPanel = () => { $('#redo').hidden = true; };
 
 // ---------- hooks ----------
 onSelectionChanged = () => {
+  trackRefresh();
   for (const o of S.objects) refreshOverlays(o);
   refreshOriginDots();
   updateStats();
@@ -960,7 +967,7 @@ onSelectionChanged = () => {
 onModeChanged = () => {
   buildSubbar();
   $('#modeLbl').textContent = S.mode === 'edit' ? 'Edit' : 'Object';
-  $('#selModes').hidden = S.mode !== 'edit';
+  $('#selModes').hidden = S.workspace !== 'model' || S.mode !== 'edit';
   for (const b of document.querySelectorAll('#selModes button')) b.classList.toggle('on', b.dataset.sm === S.selectMode);
   buildShelf();
   refreshSheet();
@@ -980,7 +987,7 @@ const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastT
 function cancelHold() { clearTimeout(G.holdTimer); G.holdTimer = null; }
 function beginHold(e, p) {
   cancelHold();
-  if (e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
+  if (S.workspace !== 'model' || e.button !== 0 || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
   const object = S.active, mode = S.mode, selectMode = S.selectMode;
   G.holdTimer = setTimeout(() => {
     if (G.p.size !== 1 || G.mode !== 'pending' || G.moved || S.active !== object || S.mode !== mode || S.selectMode !== selectMode || TF.active || PM.active || S.pendingTap || S.tool !== 'select') return;
@@ -1109,6 +1116,7 @@ document.addEventListener('gesturechange', (e) => e.preventDefault());
 
 function handleTap(x, y, ptype) {
   if (TF.active || PM.active) return;
+  if (S.workspace !== 'model') { trackTap(x,y); return; }
   const radius = ptype === 'mouse' ? 14 : 28;
   if (S.pendingTap === 'loopcut') { loopCutAt(x, y); return; }
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
@@ -1280,6 +1288,7 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'Numpad5') { toggleOrtho(); return; }
     if (e.code === 'NumpadDecimal') { frameSelected(); return; }
   }
+  if (S.workspace !== 'model') { if (k === 'Escape') { TRACKVIEW.action = 'select'; hint(null); } return; }
   const edit = S.mode === 'edit';
   const lk = k.toLowerCase();
   if (k === 'Tab') { e.preventDefault(); setMode(edit ? 'object' : 'edit'); return; }
@@ -1370,7 +1379,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

@@ -127,7 +127,7 @@ function serializeProject() {
     materials: S.materials,
     images: [...S.images.values()].filter((im) => used.has(im.id)).map((im) => ({ id: im.id, name: im.name, mime: im.mime, data: b64FromBytes(im.bytes) })),
     active: S.active ? S.active.id : null,
-    cursor: S.cursor.toArray(), ruler: normalizeRuler(S.ruler),
+    cursor: S.cursor.toArray(), ruler: normalizeRuler(S.ruler), track: normalizeTrack(S.track),
     camera: { target: CAM.target.toArray(), yaw: CAM.yaw, pitch: CAM.pitch, dist: CAM.dist, ortho: CAM.ortho },
     settings: { shading: S.shading, selectMode: S.selectMode, pivot: S.pivot, orient: S.orient },
   };
@@ -140,6 +140,7 @@ async function loadProject(data) {
   clearImages();
   S.objects = []; S.materials = [];
   S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
+  S.track = normalizeTrack(data.track || {scale: settingsGet('export', {}).scale});
   S.ruler = normalizeRuler(data.ruler); rulerResetPending();
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
@@ -280,7 +281,7 @@ function runExport(fmt, opts) {
   if (!scene.objects.length) throw new Error(opts.selectedOnly ? 'No selected objects to export' : 'Nothing to export');
   const eo = { yUp: opts.yUp, applyTransforms: opts.applyTransforms, triangulate: opts.triangulate, baseName: opts.baseName };
   let files;
-  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: opts.scale });
+  if (fmt === 'brres') files = exportBRRES(scene, { baseName: opts.baseName, scale: opts.scale ?? S.track.scale });
   else if (fmt === 'obj') files = exportOBJ(scene, eo);
   else if (fmt === 'fbx') files = exportFBX(scene, eo);
   else if (fmt === 'dae') files = exportDAE(scene, eo);
