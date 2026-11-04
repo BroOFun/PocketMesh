@@ -1,18 +1,19 @@
-// Knife keeps a private preview mesh. Only Apply changes the project/history;
+// Knife keeps a private preview mesh. Only Done changes the project/history;
 // cancel, tool changes and editor changes discard the preview safely.
-const KNIFE = {object: null, source: null, mesh: null, first: null, hover: null, edges: new Set(), steps: []};
+const KNIFE = {object: null, source: null, mesh: null, first: null, hover: null, edges: new Set(), snapEdges: new Set(), snap: true, steps: []};
 function knifeReset() {
-  Object.assign(KNIFE, {object: null, source: null, mesh: null, first: null, hover: null, edges: new Set(), steps: []});
+  Object.assign(KNIFE, {object: null, source: null, mesh: null, first: null, hover: null, edges: new Set(), snapEdges: new Set(), snap: true, steps: []});
   if (S.tool === 'knife') S.tool = 'select';
   requestRender();
 }
 function knifeActive() { return S.tool === 'knife' && S.mode === 'edit' && S.workspace === 'model' && KNIFE.object === S.active && KNIFE.source === S.active?.mesh; }
-function knifeHint() { hint('Tap a face, edge or vertex · Apply to finish'); }
+function knifeHint() { hint('Tap a face, edge or vertex · Done to apply cuts'); }
 function knifeActivate() {
   if (knifeActive()) { knifeHint(); return; }
   if (!needEdit() || S.workspace !== 'model') return;
   finishEditorInteraction(); closeSheet(); rulerResetPending();
-  Object.assign(KNIFE, {object: S.active, source: S.active.mesh, mesh: cloneMesh(S.active.mesh), first: null, hover: null, edges: new Set(), steps: []});
+  Object.assign(KNIFE, {object: S.active, source: S.active.mesh, mesh: cloneMesh(S.active.mesh), first: null, hover: null, edges: new Set(), snapEdges: new Set(), snap: true, steps: []});
+  KNIFE.snapEdges = new Set(topo(KNIFE.mesh).edges.map(([a,b]) => ekey(a,b)));
   S.tool = 'knife'; S.pendingTap = null; G.lastTap = null;
   hideRedoPanel(); buildTools(); buildSubbar(); gizmoSync(); knifeHint(); requestRender();
 }
@@ -57,13 +58,13 @@ function knifePick(x, y, radius = 18) {
   const m = KNIFE.mesh, projected = m.verts.map(knifeScreen), topology = topo(m), vertices = [], edges = [];
   projected.forEach((p, v) => {
     const distance = Math.hypot(p.x - x, p.y - y);
-    if (p.valid && topology.vertFaces[v].length && distance <= radius) vertices.push({point: m.verts[v].slice(), screen: p, kind: 'Vertex', distance});
+    if (KNIFE.snap && p.valid && topology.vertFaces[v].length && distance <= radius) vertices.push({point: m.verts[v].slice(), screen: p, kind: 'Vertex', distance});
   });
   topology.edges.forEach(([a, b], i) => {
     const p = projected[a], q = projected[b];
-    if (!topology.edgeFaces[i].length || !p.valid || !q.valid) return;
+    if (!KNIFE.snap || !KNIFE.snapEdges.has(ekey(a,b)) || !topology.edgeFaces[i].length || !p.valid || !q.valid) return;
     const closest = distToSeg(x, y, p.x, p.y, q.x, q.y);
-    if (closest.d > radius || Math.hypot(q.x - p.x, q.y - p.y) < 1e-5) return;
+    if (closest.d > Math.min(10, radius * .45) || Math.hypot(q.x - p.x, q.y - p.y) < 1e-5) return;
     const u = perspectiveEdgeParameter(closest.t, p.w, q.w), point = vlerp(m.verts[a], m.verts[b], u);
     edges.push({point, screen: knifeScreen(point), kind: 'Edge', distance: closest.d});
   });
@@ -73,7 +74,7 @@ function knifePick(x, y, radius = 18) {
     for (const pick of list) if (knifePointVisible(pick.point)) return pick;
   }
   // Interior face placement uses the rendered surface, including concave
-  // n-gons. Preview cuts leave that surface in place until Apply.
+  // n-gons. Preview cuts leave that surface in place until Done.
   const ray = screenRay(x, y);
   const hit = ray.intersectObjects(S.objects.filter(o => o.visible).map(o => o.meshNode).filter(Boolean), false)[0];
   if (hit?.object === KNIFE.object.meshNode) {
@@ -92,11 +93,15 @@ function knifeTap(x, y, radius) {
   const result = knifeCutProjected(KNIFE.mesh, KNIFE.mesh.verts.map(knifeScreen), from, to,
     (_fi, a, b) => [.2, .5, .8].every(t => knifePointVisible(vlerp(a, b, t))));
   if (!result) { toast('No new cut · choose another point on the surface'); requestRender(); return; }
-  KNIFE.steps.push({mesh: KNIFE.mesh, first: KNIFE.first, edges: new Set(KNIFE.edges)});
+  KNIFE.steps.push({mesh: KNIFE.mesh, first: KNIFE.first, edges: new Set(KNIFE.edges), snapEdges: new Set(KNIFE.snapEdges)});
   if (KNIFE.steps.length > UNDO.max) KNIFE.steps.shift();
   KNIFE.mesh = result.mesh;
-  for (const [key, children] of result.replacements) if (KNIFE.edges.delete(key)) for (const child of children) KNIFE.edges.add(child);
-  for (const key of result.edges) KNIFE.edges.add(key);
+  // Only visible original edges and cut lines are snap targets. Supporting
+  // diagonals inside the private preview must not pull taps away from a face.
+  for (const set of [KNIFE.edges, KNIFE.snapEdges]) {
+    for (const [key, children] of result.replacements) if (set.delete(key)) for (const child of children) set.add(child);
+    for (const key of result.edges) set.add(key);
+  }
   KNIFE.first = pick; buildSubbar(); requestRender();
 }
 function drawKnife() {

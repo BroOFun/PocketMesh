@@ -409,7 +409,13 @@ function opSeam(mark) {
 }
 function opTriangulate() {
   if (!needSel('faces')) return;
-  runOp('Triangulate Faces', () => { const r = triangulateFaces(om(), osel().faces); setSelFaces(r.faces); rebuildObject(S.active); });
+  runOp('Triangulate Faces', () => {
+    const r = triangulateFaces(om(), osel().faces);
+    if (r.skipped) toast(`${r.skipped} invalid face outline${r.skipped > 1 ? 's' : ''} left unchanged · check crossing or duplicate edges`, true);
+    else if (!r.changed) toast('Selected faces are already triangles');
+    if (!r.changed) return false;
+    setSelFaces(r.faces); rebuildObject(S.active);
+  });
 }
 function opTrisToQuads() {
   if (!needSel('faces')) return;

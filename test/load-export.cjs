@@ -13,7 +13,8 @@ function loadExport() {
   const topLevel = [...src.matchAll(/^(?:function|const|let|var|class)\s+([A-Za-z0-9_$]+)/gm)].map((m) => m[1]);
   const bad = topLevel.filter((n) => !/^_ex|^_EX/.test(n));
   if (bad.length) throw new Error('unprefixed private top-level names: ' + bad.join(', '));
-  const body = src.replace(/^export\s+/gm, '');
+  const shared = fs.readFileSync(path.join(__dirname, '..', 'src', 'triangulate.js'), 'utf8');
+  const body = (shared + '\n' + src).replace(/^export\s+/gm, '');
   // eslint-disable-next-line no-new-func
   const api = new Function('"use strict";\n' + body + '\nreturn {' + exported.join(',') + ', _private: { _exTriangulate, _exQuatToEulerXYZDeg, _exNewell } };')();
   return { api, exported };

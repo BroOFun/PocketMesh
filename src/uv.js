@@ -93,73 +93,9 @@ function _uvUnion(p, a, b) {
 // Triangulation (ear clipping on the Newell-plane projection)
 // ---------------------------------------------------------------------------
 
-const _uvTriTmp = { xs: new Float64Array(64), ys: new Float64Array(64), n: new Float64Array(9) };
-
-// Appends local corner index triples of face `vs` to `out` (a plain array).
+// Keep n-gon UV solving consistent with the model and exported triangles.
 function _uvTriangulate(P, vs, out) {
-  const n = vs.length;
-  if (n === 3) { out.push(0, 1, 2); return; }
-  const T = _uvTriTmp;
-  if (T.xs.length < n) { T.xs = new Float64Array(n * 2); T.ys = new Float64Array(n * 2); }
-  const nn = _uvNewell(P, vs, [0, 0, 0]);
-  const B = _uvBasis(nn[0], nn[1], nn[2], T.n);
-  const xs = T.xs, ys = T.ys;
-  for (let i = 0; i < n; i++) {
-    const p = P[vs[i]];
-    xs[i] = p[0] * B[0] + p[1] * B[1] + p[2] * B[2];
-    ys[i] = p[0] * B[3] + p[1] * B[4] + p[2] * B[5];
-  }
-  if (n === 4) {
-    const cr = (a, b, c) => (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a]);
-    const okA = cr(0, 1, 2) > 0 && cr(0, 2, 3) > 0;
-    const okB = cr(1, 2, 3) > 0 && cr(1, 3, 0) > 0;
-    let useA = true;
-    if (okA && okB) {
-      const p0 = P[vs[0]], p1 = P[vs[1]], p2 = P[vs[2]], p3 = P[vs[3]];
-      const d02 = (p0[0] - p2[0]) ** 2 + (p0[1] - p2[1]) ** 2 + (p0[2] - p2[2]) ** 2;
-      const d13 = (p1[0] - p3[0]) ** 2 + (p1[1] - p3[1]) ** 2 + (p1[2] - p3[2]) ** 2;
-      useA = d02 <= d13;
-    } else if (okB) useA = false;
-    if (useA) out.push(0, 1, 2, 0, 2, 3); else out.push(1, 2, 3, 1, 3, 0);
-    return;
-  }
-  _uvEarClip(xs, ys, n, out);
-}
-
-function _uvEarClip(xs, ys, n, out) {
-  const idx = [];
-  let area = 0;
-  for (let i = 0; i < n; i++) {
-    idx.push(i);
-    const j = (i + 1) % n;
-    area += xs[i] * ys[j] - xs[j] * ys[i];
-  }
-  const sg = area >= 0 ? 1 : -1;
-  const cross = (a, b, c) => sg * ((xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a]));
-  while (idx.length > 3) {
-    const m = idx.length;
-    let pick = -1, best = -Infinity, bestK = 0;
-    for (let k = 0; k < m; k++) {
-      const ia = idx[(k + m - 1) % m], ib = idx[k], ic = idx[(k + 1) % m];
-      const cr = cross(ia, ib, ic);
-      if (cr > best) { best = cr; bestK = k; }
-      if (cr <= 0) continue;
-      let inside = false;
-      for (let q = 0; q < m && !inside; q++) {
-        const ip = idx[q];
-        if (ip === ia || ip === ib || ip === ic) continue;
-        if ((xs[ip] === xs[ia] && ys[ip] === ys[ia]) || (xs[ip] === xs[ib] && ys[ip] === ys[ib]) ||
-            (xs[ip] === xs[ic] && ys[ip] === ys[ic])) continue;
-        if (cross(ia, ib, ip) >= 0 && cross(ib, ic, ip) >= 0 && cross(ic, ia, ip) >= 0) inside = true;
-      }
-      if (!inside) { pick = k; break; }
-    }
-    if (pick < 0) pick = bestK; // degenerate polygon: clip the most convex corner
-    const ia = idx[(pick + m - 1) % m], ib = idx[pick], ic = idx[(pick + 1) % m];
-    out.push(ia, ib, ic);
-    idx.splice(pick, 1);
-  }
-  out.push(idx[0], idx[1], idx[2]);
+  for (const tri of triangulatePolygon(vs.map(v => P[v]))) out.push(...tri);
 }
 
 // ---------------------------------------------------------------------------

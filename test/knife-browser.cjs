@@ -39,9 +39,13 @@ const {chromium, devices} = require('playwright');
         if (mobile) await page.touchscreen.tap(s.x, s.y); else await page.mouse.click(s.x, s.y);
       };
       const state = () => page.evaluate(() => ({verts: __pm.S.active.mesh.verts, faces: __pm.S.active.mesh.faces}));
-      const apply = () => page.getByRole('button', {name: 'Apply knife cuts', exact: true}).click();
+      const apply = () => page.getByRole('button', {name: 'Done · apply knife cuts', exact: true}).click();
       await load(); const initial = await state();
+      await page.evaluate(()=>{document.querySelector('#sub').scrollLeft=10000;});
       await start();
+      const doneBox=await page.getByRole('button',{name:'Done · apply knife cuts',exact:true}).boundingBox();
+      assert.ok(doneBox.x>=0 && doneBox.x+doneBox.width<=page.viewportSize().width,'Done is visible without horizontal scrolling');
+      assert.equal(await page.evaluate(()=>__pm.KNIFE.snap),true,'Snapping starts enabled');
       await tap([-1,-1,0], [7,-4]);
       assert.deepEqual(await page.evaluate(() => __pm.KNIFE.first.point), [-1,-1,0], 'Offset input magnetizes exactly to the vertex');
       assert.equal(await page.evaluate(() => __pm.KNIFE.first.kind), 'Vertex');
@@ -61,7 +65,7 @@ const {chromium, devices} = require('playwright');
       await page.locator('#btnRedo').click(); assert.deepEqual(await state(), applied);
       await page.locator('#btnUndo').click();
       // Cut an edge, then cross the preview with another cut. New preview edges
-      // are snap targets, but project geometry only changes once on Apply.
+      // are snap targets, but project geometry only changes once on Done.
       await start(); await tap([-1,0,0]); await tap([1,0,0]);
       assert.equal(await page.evaluate(() => __pm.KNIFE.hover.kind), 'Edge');
       await page.getByRole('button', {name: 'New cut', exact: true}).click();
@@ -79,6 +83,22 @@ const {chromium, devices} = require('playwright');
       await tap([.45,-.3,0]);
       assert.ok(await page.evaluate(()=>__pm.KNIFE.edges.size>0));
       assert.deepEqual(await state(),initial);
+      const hiddenEdgePick=await page.evaluate(()=>{
+        const p=__pm,k=p.KNIFE,rect=document.querySelector('#c3d').getBoundingClientRect();
+        const points=k.mesh.verts.map(v=>p.screenOf(...v));
+        const dist=(p,a,b)=>{const dx=b.x-a.x,dy=b.y-a.y,t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy)));return Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);};
+        const visible=[...k.snapEdges].map(e=>e.split('_').map(Number));
+        for(const [a,b] of p.topo(k.mesh).edges) {
+          if(k.snapEdges.has(a<b?`${a}_${b}`:`${b}_${a}`)) continue;
+          for(const t of [.25,.5,.75]) {
+            const q={x:points[a].x*(1-t)+points[b].x*t,y:points[a].y*(1-t)+points[b].y*t};
+            if(points.some(v=>Math.hypot(v.x-q.x,v.y-q.y)<29)||visible.some(([a,b])=>dist(q,points[a],points[b])<12)) continue;
+            return p.knifePick(q.x-rect.x,q.y-rect.y,28)?.kind;
+          }
+        }
+        return 'no candidate';
+      });
+      assert.equal(hiddenEdgePick,'Face','Invisible support diagonals do not magnetize the next cut');
       await page.screenshot({path:`work/face-knife-${layout}.png`,animations:'disabled'});
       await page.getByRole('button',{name:'Undo cut',exact:true}).click();
       assert.equal(await page.evaluate(()=>__pm.KNIFE.mesh.faces.length),1);
@@ -88,6 +108,12 @@ const {chromium, devices} = require('playwright');
       await page.locator('#btnUndo').click(); assert.deepEqual(await state(),initial);
       await page.locator('#btnRedo').click(); assert.deepEqual(await state(),interior);
       await page.locator('#btnUndo').click();
+      await start(); await page.getByRole('button',{name:'Knife snapping',exact:true}).click();
+      await tap([-.95,-.95,0]);
+      const precise=await page.evaluate(()=>__pm.KNIFE.first);
+      assert.equal(precise.kind,'Face','Snap off permits face points near a corner');
+      assert.ok(Math.hypot(precise.point[0]+.95,precise.point[1]+.95)<.015);
+      await page.getByRole('button',{name:'Cancel knife cuts',exact:true}).click();
       // Switching tool/editor or pressing Escape discards a pending knife cut.
       await start(); await tap([-1,-1,0]); await tap([1,1,0]);
       await page.getByRole('button', {name: 'Move gizmo', exact: true}).click(); assert.deepEqual(await state(), initial);
@@ -116,6 +142,33 @@ const {chromium, devices} = require('playwright');
       assert.equal(await page.evaluate(() => __pm.KNIFE.first), null);
       await page.keyboard.press('Tab');
       assert.equal(await page.getByRole('button', {name: 'Knife tool · K', exact: true}).count(), 0);
+      // Real taps on a concave face create preview cuts; Done commits once.
+      await load('ngon'); const beforeNgon=await state();
+      await page.evaluate(()=>__pm.setSelectMode('face'));
+      await start(); await tap([-.5,.5,0]); await tap([-.4,-.5,0]); await tap([.5,-.5,0]);
+      assert.equal(await page.evaluate(()=>__pm.KNIFE.steps.length),2);
+      assert.equal(await page.evaluate(()=>__pm.KNIFE.hover.kind),'Face');
+      assert.deepEqual(await state(),beforeNgon);
+      await apply(); const cutNgon=await state();
+      assert.ok(cutNgon.faces.length>1 && cutNgon.verts.length>=9);
+      await page.locator('#btnUndo').click(); assert.deepEqual(await state(),beforeNgon);
+      await page.locator('#btnRedo').click(); assert.deepEqual(await state(),cutNgon);
+      // Triangulate n-gons via the shelf and Ctrl+T; retain UVs and selection.
+      await load('ngon');
+      await page.evaluate(()=>{__pm.setSelectMode('face');__pm.editSelectAll('select');__pm.pushUndo('Select n-gon');});
+      const beforeTri=await state();
+      await page.getByRole('button',{name:'Triangulate',exact:true}).click();
+      const afterTri=await state();
+      assert.equal(afterTri.faces.length,4);
+      assert.equal(await page.evaluate(()=>__pm.S.active.esel.faces.size),4);
+      for(const f of afterTri.faces) {
+        assert.equal(f.v.length,3); assert.equal(f.mat,beforeTri.faces[0].mat);
+        assert.deepEqual(f.uv,f.v.map(v=>beforeTri.faces[0].uv[v]));
+      }
+      await page.locator('#btnUndo').click(); assert.deepEqual(await state(),beforeTri);
+      await page.keyboard.press('Control+t'); assert.deepEqual(await state(),afterTri);
+      await page.locator('#btnUndo').click(); assert.deepEqual(await state(),beforeTri);
+      await page.locator('#btnRedo').click(); assert.deepEqual(await state(),afterTri);
       // Inset is accessible in the sidebar, preserves a concave n-gon and
       // rolls back both geometry and selection on Cancel.
       await load('ngon');
@@ -157,7 +210,7 @@ const {chromium, devices} = require('playwright');
       await page.locator('#tfbar').getByRole('button',{name:'Done',exact:true}).click();
       assert.equal((await state()).faces[0].v.length,6);
       assert.deepEqual(errors, []);
-      console.log(`${layout}: vertex magnets, edge/crossing cuts, preview/cancel/save isolation, apply/undo/redo, keyboard, pane/tool switches, occlusion, orbit, face-interior cuts and concave n-gon inset/cancel/undo/redo/drag passed`);
+      console.log(`${layout}: Done visibility, vertex/edge magnets, optional snap, hidden support edges, face/concave n-gon cuts, preview/cancel/save isolation, undo/redo, triangulate shelf/shortcut/UVs, keyboard, pane/tool switches, occlusion, orbit and n-gon inset passed`);
       await ctx.close();
     }
   } finally {await browser.close(); server.close();}

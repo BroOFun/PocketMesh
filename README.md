@@ -51,6 +51,7 @@ See [Basic track authoring](TRACK-AUTHORING.md) for the BRRES/KCL/KMP workflow, 
 docs/            the built app (served by GitHub Pages)
 src/             source modules, concatenated by build.mjs into docs/index.html
   DATA-FORMAT.md mesh and scene data format shared by the modules
+  triangulate.js shared boundary-preserving, angle-improving triangulation
   mesh.js        mesh data structure, primitives, modeling operators
   uv.js          unwrapping, projections, packing, straightening
   extrude.js     Cursor extrusion and optional source/destination rotation
@@ -100,16 +101,26 @@ UV. The 3D cursor uses a small, thin red-and-white ring with short crosshairs.
 them exactly vertical. Both keep spacing along that UV axis and leave unselected
 UVs unchanged. Plain **Straighten** follows the direction between the endpoints.
 
+Select faces in **Edit Mode** and tap **Triangulate** on the bottom shelf
+(also **Mesh → Triangulate Faces**, keyboard: **Ctrl+T**). Quads and convex or
+concave n-gons become triangles while retaining their boundary vertices,
+materials and UVs. Interior diagonals are improved to reduce skinny triangles
+where possible. Rendering, UV unwrapping and triangle exports use this same
+algorithm. Crossing or duplicate-corner outlines are left unchanged by the
+modeling command, with a message to fix the outline. Undo restores the n-gons.
+
 In **Edit Mode**, choose **Knife** in the left sidebar (keyboard: **K**). Tap a
 face, vertex or edge to start, then another point to preview a cut across the
 visible faces. Face interiors show a blue ring; edge snaps show lavender. Nearby vertices magnetize automatically and show a green ring.
-Keep tapping to continue, or choose **New cut** for a separate stroke. **Apply**
+Keep tapping to continue, or choose **New cut** for a separate stroke. **Done**
 (Enter) commits the cuts as one undoable operation; **Cancel** (Escape) discards
 them. **Undo cut** (Backspace) removes the last preview segment. Drag to orbit or
 use two fingers to navigate. Materials, UV seams and creases survive the cuts.
 Cuts can start and end inside faces, including n-gons. Interior endpoints add
 supporting triangles so the cut is part of the surface. Hidden surfaces are
-left untouched.
+left untouched. **Knife Snap** starts enabled; turn it off for precise face
+placement near a vertex or edge. Invisible supporting diagonals do not attract
+the next cut. The purple **Done** button stays first in the knife controls.
 
 Select faces and choose **Inset** in the left sidebar (keyboard: **I**, also in
 **Mesh → Inset Faces**). Drag horizontally or type a thickness, then tap **Done**.

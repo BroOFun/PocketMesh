@@ -3,7 +3,7 @@ import fs from 'node:fs';
 
 const src = fs.readFileSync(new URL('../src/uv.js', import.meta.url), 'utf8');
 if (/^\s*import\s/m.test(src)) throw new Error('uv.js must not contain import lines');
-const UV = await import('data:text/javascript;base64,' + Buffer.from(src).toString('base64'));
+const UV = await import('data:text/javascript;base64,' + Buffer.from(fs.readFileSync(new URL('../src/triangulate.js', import.meta.url), 'utf8') + '\n' + src).toString('base64'));
 
 // ---------------------------------------------------------------- harness
 let fails = 0, passes = 0;
