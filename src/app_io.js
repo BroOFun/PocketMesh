@@ -134,6 +134,8 @@ function serializeProject() {
 }
 async function loadProject(data) {
   if (!data || data.app !== 'PocketMesh' || !Array.isArray(data.objects)) throw new Error('This file is not a PocketMesh project');
+  const track = normalizeTrack(data.track || {scale: settingsGet('export', {}).scale});
+  checkpointCancel();CHECKPOINT.selected=-1;CHECKPOINT.group=0;
   knifeReset(); circleReset();
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
@@ -141,7 +143,7 @@ async function loadProject(data) {
   clearImages();
   S.objects = []; S.materials = [];
   S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
-  S.track = normalizeTrack(data.track || {scale: settingsGet('export', {}).scale});
+  S.track = track;
   S.ruler = normalizeRuler(data.ruler); rulerResetPending();
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }

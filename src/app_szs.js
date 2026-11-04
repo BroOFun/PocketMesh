@@ -110,6 +110,7 @@ function szsProjectFile(name) {
     return exportKMP(S.track.start, {
       scale: S.track.scale,
       template: S.track.template ? bytesFromB64(S.track.template) : null,
+      checkpoints: S.track.checkpoints,
     });
   return runExport('brres', {
     baseName: 'course_model',

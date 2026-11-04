@@ -101,6 +101,7 @@ const ICONS = {
   dots: '<circle cx="5.5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
   tri: '<path d="M4 19 12 5l8 14z"/><path d="M12 19V5M8 12h8" stroke-opacity=".55"/>',
+  checkpoint: '<path d="M4 16h16M12 16V4m-4 4 4-4 4 4"/><circle cx="4" cy="16" r="2"/><circle cx="20" cy="16" r="2"/>',
   grid: '<path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16"/>',
   hide: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" stroke-opacity=".35"/><path d="M4 20 20 4"/>',
   stretch: '<rect x="3.5" y="3.5" width="17" height="17" rx="1"/><path d="M3.5 3.5h8.5v8.5H3.5z" fill="#4b9df6" fill-opacity=".5" stroke="none"/><path d="M12 12h8.5v8.5H12z" fill="#f2506b" fill-opacity=".5" stroke="none"/>',
@@ -967,6 +968,7 @@ function restore(snap) {
   S.mode = S.workspace === 'model' && snap.mode === 'edit' && S.active ? 'edit' : 'object';
   S.selectMode = snap.selectMode;
   S.cursor.fromArray(snap.cursor);
+  checkpointCancel();
   S.track = normalizeTrack(snap.track);
   S.ruler = normalizeRuler(snap.ruler); rulerResetPending();
   S.uvSel = new Set(snap.uvSel);

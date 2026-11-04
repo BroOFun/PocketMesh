@@ -8,7 +8,7 @@
   },
   "scripts": {
     "build": "node build.mjs",
-    "test": "node test/triangulate.test.mjs && node test/mesh.test.mjs && node test/uv.test.mjs && node test/track.test.mjs && node test/editor.test.mjs && node test/track-files.test.mjs && node test/szs.test.mjs && node test/creases.test.mjs && node test/tap-extrude.test.mjs && node test/knife.test.mjs && node test/inset.test.mjs",
+    "test": "node test/triangulate.test.mjs && node test/mesh.test.mjs && node test/uv.test.mjs && node test/track.test.mjs && node test/editor.test.mjs && node test/track-files.test.mjs && node test/checkpoints.test.mjs && node test/szs.test.mjs && node test/creases.test.mjs && node test/tap-extrude.test.mjs && node test/knife.test.mjs && node test/inset.test.mjs",
     "test:track:browser": "node test/track-browser.cjs",
     "test:editor:browser": "node test/editor-browser.cjs",
     "test:materials:browser": "node test/materials-browser.cjs",
@@ -18,6 +18,7 @@
     "test:creases:browser": "node test/creases-browser.cjs",
     "test:track-editor:browser": "node test/track-editor-browser.cjs",
     "test:uv-controls:browser": "node test/uv-controls-browser.cjs",
+    "test:checkpoints:browser": "node test/checkpoints-browser.cjs",
     "test:zoom:browser": "node test/zoom-browser.cjs",
     "test:selection:browser": "node test/selection-browser.cjs",
     "test:knife:browser": "node test/knife-browser.cjs",

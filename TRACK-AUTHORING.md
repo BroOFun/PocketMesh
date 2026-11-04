@@ -224,22 +224,73 @@ texture: the same image can be normal road, boost, or another assigned behavior.
    avoids empty path sections that can freeze Mario Kart Wii. The loop has a
    5,000-Wii-unit radius near Start and is a placeholder, not a route fitted to
    your geometry. Use **Time Trials** for initial driving/collision tests; CPU
-   racing, lap behavior, respawn coverage and route-dependent items need proper
-   routes/checkpoints later. The finish material is only a reference label.
+   racing, respawn coverage and route-dependent items need fitted routes later.
+   Draw your own checkpoint loop using the checkpoint tool below. The finish
+   material is only a reference label.
 6. Alternatively, **Open existing KMP** from your own working track package.
-   PocketMesh reads its first start point; export changes only that point's
-   position and rotation. Other KTPT entries, player indices, padding, sections
+   PocketMesh reads its first start point and checkpoint gates/groups. Export
+   updates the first start point and any edited checkpoint sections. Untouched
+   checkpoint bytes, other KTPT entries, player indices, padding, other sections
    and unknown section data are preserved. The existing routes are not moved to
-   fit a new mesh. **Use automatic test setup** detaches that base file.
+   fit a new mesh. **Use automatic test setup** detaches that base file and resets
+   the authored checkpoints to the temporary loop on export.
 
-Material flags, finish labels, export scale, start position/heading/clearance and
-an imported KMP are included in project save/autosave and Undo/Redo. Workspace
-switching itself does not reset the model, history or camera.
+Material flags, finish labels, export scale, start position/heading/clearance,
+checkpoint edits and an imported KMP are included in project save/autosave and
+Undo/Redo. Workspace switching itself does not reset the model, history or camera.
 
 A game test still needs a suitable **SZS track package** with the BRRES, KCL and
 KMP, plus required resources such as minimap/sky and any referenced object files.
 Use **SZS → Open SZS** to replace files in an existing package. Noclip validates visuals, not racing
 or collision. No Wii/Dolphin gameplay test has been performed for these exports.
+
+### Checkpoint drawing
+
+Choose **KMP → Checkpoints** in the sidebar or shelf. This tool opens **Top
+Orthographic** view by default while keeping your model and current zoom. In
+**Draw**, click/touch and drag across the road, then release to add a gate. Drag
+from its left edge to its right edge as seen facing the racing direction. The
+arrow previews which way racers cross it; **Flip direction** swaps its endpoints.
+The first drawn gate defaults to **Lap**, then the tool switches to **Normal**.
+Select **Normal**, **Key**, or **Lap** in the top controls before drawing.
+
+In **Edit**, drag an endpoint to reshape a gate or drag its line to move the whole
+gate. Tap a line to select it. **Checkpoint settings** contains exact endpoint
+coordinates, type, key ID, respawn index, direction, and driving order. **Earlier /
+Later** reorders within a group; **Delete checkpoint** removes the selection.
+**Number keys in order** assigns consecutive IDs after the lap line for a single
+route group. **Top view** restores the overhead view; **Done** exits drawing.
+Two-finger pan/pinch, view buttons, and desktop middle/right-mouse navigation
+remain available. Adding a second finger or canceling a drag discards its preview.
+Each completed creation, move, type change, reorder, or deletion supports Undo.
+
+Normal gates are blue, keys green, and the lap gate pink. Use one lap gate and
+pass key IDs in driving order. Dotted side links show the corridor between gates;
+the settings panel flags missing lap/key gates, inconsistent key numbers, and
+folded/backward connections. Gates have no height in the game: they extend
+vertically. The displayed height follows the surface where drawing starts.
+These checks help author a route but do not prove it is race-ready.
+
+New drawings form one closed checkpoint group in drawing order. Imported KMPs
+retain their existing group links, including branches. Choose a group in settings
+to append lines to it; reordering stays inside that group. Removing the last line
+of an imported group is disabled so its connections cannot silently break. This
+basic tool edits up to 255 gates; it does not create branch-group connections or
+edit respawn positions, enemy routes, or item routes. Imported checkpoint data is
+preserved byte-for-byte until edited. Once edited, CKPT/CKPH are written using the
+shared course-model export scale (100× by default), including when replacing
+`course.kmp` in the SZS editor. Other imported sections remain unchanged.
+
+The checkpoint binary tests cover axes/scale, types, direction, sequence and group
+links, malformed files, cloning for undo, and imported KMP preservation. Browser
+tests exercise desktop, phone, and landscape drawing/editing, cancellation,
+key numbering, downloads, and SZS replacement. A convex authored test loop was
+checked with Wiimm; its independent enemy/item-route fixture was fitted to that
+loop. In-game validation still requires Wii/Dolphin.
+
+Format references: [RiiStudio checkpoint reader/writer](https://github.com/riidefi/RiiStudio/blob/master/source/librii/kmp/io/KMP.cpp),
+[Wiimm checkpoint convexity checks](https://github.com/Wiimm/wiimms-szs-tools/blob/master/project/src/lib-kmp.c),
+and [Lorenzi's checkpoint editor](https://github.com/hlorenzi/kmp-editor/blob/master/src/viewer/viewerCheckpoints.js).
 
 ## SZS archive editor
 
