@@ -37,6 +37,7 @@ function openTrackEditor() {
   ]);
 }
 function setWorkspace(workspace) {
+  if (S.tool === 'circle') circleDone();
   if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();

@@ -109,6 +109,9 @@ canvas.view { position: absolute; inset: 0; width: 100%; height: 100%; display: 
 .navbtns button svg { width: 20px; height: 20px; }
 .navbtns button.on { color: var(--on); background: var(--on-bg); }
 .navbtns button.shade { color: var(--sel); }
+#circleBrush { position: absolute; border: 1.5px dashed var(--sel-bright); box-shadow: 0 0 0 1px #0007; border-radius: 50%; transform: translate(-50%, -50%); pointer-events: none; z-index: 3; }
+#circleBrush.subtract { border-style: solid; }
+#circleRadius { width: 52px; height: 26px; padding: 0 3px; font-size: 13px; }
 #boxrect { position: absolute; border: 1.5px dashed #fff; background: #ffffff12; pointer-events: none; z-index: 3; }
 #hint { left: 50%; transform: translateX(-50%); top: 8px; background: #000b; color: #fff; padding: 6px 12px; border-radius: 8px; font-size: 14px; pointer-events: none; max-width: 70%; text-align: center; }
 #toast { position: fixed; left: 50%; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--panel-2); border: 1px solid var(--line); padding: 8px 14px; border-radius: 10px; font-size: 14px; z-index: 30; max-width: 86%; text-align: center; box-shadow: 0 6px 20px #0008; pointer-events: none; }
@@ -273,6 +276,7 @@ kbd { font: 11px var(--mono); border: 1px solid var(--line); border-radius: 4px;
       <div class="ovl toolcol" id="tools"></div>
       <div class="ovl" id="navwrap"><canvas id="nav" width="184" height="184"></canvas><div class="navbtns" id="navbtns"></div></div>
       <div id="boxrect" hidden></div>
+      <div id="circleBrush" aria-hidden="true" hidden></div>
       <div class="ovl" id="hint" hidden></div>
       <details class="ovl" id="redo" hidden><summary id="redoTitle">Adjust</summary><div id="redoBody"></div></details>
     </section>
@@ -6906,6 +6910,7 @@ const ICONS = {
   face: '<rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor" fill-opacity=".85"/>',
   select: '<path d="M6 3.5 18.5 12l-5.4 1.3L10.2 19z" fill="currentColor" fill-opacity=".18"/>',
   box: '<rect x="3.5" y="4.5" width="15" height="12" rx="1" stroke-dasharray="3 2.4"/><path d="M14 13l7 2.8-3 .9-1 3z" fill="currentColor"/>',
+  circleSelect: '<circle cx="11" cy="11" r="8" stroke-dasharray="2 2"/><path d="M14 13l7 2.8-3 .9-1 3z" fill="currentColor"/>',
   cursor: '<circle cx="12" cy="12" r="6" stroke-dasharray="3.1 3.1"/><path d="M12 2.5v5M12 16.5v5M2.5 12h5M16.5 12h5"/>',
   move: '<path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/>',
   rotate: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.8v4.6h-4.6"/>',
@@ -7367,12 +7372,13 @@ function refreshOverlays(o) {
   if (o.fselOv) o.fselOv.visible = false;
   // edges
   const showEdges = editing || wire || o.selected;
-  if (showEdges && T.edges.length) {
-    const pos = new Float32Array(T.edges.length * 6), col = new Float32Array(T.edges.length * 6);
+  const shownEdges = showEdges ? T.edges : T.edges.filter((_, i) => !T.edgeFaces[i].length);
+  if (shownEdges.length) {
+    const pos = new Float32Array(shownEdges.length * 6), col = new Float32Array(shownEdges.length * 6);
     const s = o.esel;
-    let base = wire && !o.selected ? COL.wire : o === S.active ? COL.objAct : COL.objSel;
+    let base = !o.selected ? COL.wire : o === S.active ? COL.objAct : COL.objSel;
     if (editing) base = seeThrough ? COL.wire : COL.dark;
-    T.edges.forEach(([a, b], i) => {
+    shownEdges.forEach(([a, b], i) => {
       const pa = P[a], pb = P[b];
       pos.set(pa, i * 6); pos.set(pb, i * 6 + 3);
       let c = base;
@@ -7395,14 +7401,14 @@ function refreshOverlays(o) {
     const mat = editing ? (seeThrough ? LM.editX : LM.edit) : wire ? (S.xray ? LM.wireX : LM.wire) : LM.outline;
     setLineGeo(o, 'edgeOv', pos, col, mat);
   } else if (o.edgeOv) o.edgeOv.visible = false;
-  // vertices
-  const T2 = T;
-  if (editing && (S.selectMode === 'vert' || T2.edges.length === 0)) {
-    const pos = new Float32Array(P.length * 3), col = new Float32Array(P.length * 3);
-    for (let i = 0; i < P.length; i++) {
-      pos.set(P[i], i * 3);
-      col.set(o.esel.verts.has(i) ? COL.sel : seeThrough ? COL.wire : COL.dark, i * 3);
-    }
+  // Isolated points remain visible even when the object has no faces/edges.
+  const pointIds = P.map((_,i)=>i).filter(i => editing ? S.selectMode === 'vert' || !T.edges.length : !T.vertEdges[i].length);
+  if (pointIds.length) {
+    const pos = new Float32Array(pointIds.length * 3), col = new Float32Array(pointIds.length * 3);
+    pointIds.forEach((v,i) => {
+      pos.set(P[v], i * 3);
+      col.set(editing ? (o.esel.verts.has(v) ? COL.sel : seeThrough ? COL.wire : COL.dark) : o.selected ? COL.objAct : COL.wire, i * 3);
+    });
     setPointsGeo(o, 'vertOv', pos, col, 7, seeThrough);
   } else if (o.vertOv) o.vertOv.visible = false;
   // face dots
@@ -7536,7 +7542,7 @@ function frameSelected() {
     for (const v of S.active.esel.verts) box.expandByPoint(_v1.fromArray(S.active.mesh.verts[v]).applyMatrix4(mw));
   } else {
     const objs = S.objects.filter((o) => o.selected && o.visible);
-    for (const o of objs.length ? objs : S.objects.filter((o) => o.visible)) { o.node.updateMatrixWorld(); o.meshNode.geometry.computeBoundingBox(); const b = o.meshNode.geometry.boundingBox.clone().applyMatrix4(o.node.matrixWorld); box.union(b); if (!o.mesh.verts.length) box.expandByPoint(o.node.position); }
+    for (const o of objs.length ? objs : S.objects.filter((o) => o.visible)) { o.node.updateMatrixWorld(); o.meshNode.geometry.computeBoundingBox(); const b = o.meshNode.geometry.boundingBox.clone().applyMatrix4(o.node.matrixWorld); box.union(b); if (b.isEmpty()) for (const v of o.mesh.verts) box.expandByPoint(new THREE.Vector3(...v).applyMatrix4(o.node.matrixWorld)); if (!o.mesh.verts.length) box.expandByPoint(o.node.position); }
   }
   if (box.isEmpty()) box.expandByPoint(S.cursor).expandByScalar(2);
   frameBox(box);
@@ -7571,23 +7577,19 @@ function projectMeshVerts(o) {
   }
   return out;
 }
-// is a local-space point on object o visible (not hidden behind the object's own surface)?
+// Is a local-space point visible through the scene's surfaces?
 function pointVisible(o, local) {
   if (S.xray || S.shading === 'wire') return true;
-  const wp = _v1.fromArray(local).applyMatrix4(o.node.matrixWorld).clone();
-  const camPos = camera.position.clone();
-  let dir, origin, dist;
-  if (camera.isOrthographicCamera) {
-    dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    origin = wp.clone().addScaledVector(dir, -1000);
-    dist = 1000;
-  } else {
-    dir = wp.clone().sub(camPos); dist = dir.length(); dir.normalize(); origin = camPos;
-  }
-  const rc = new THREE.Raycaster(origin, dir, 0, dist * 1.01);
-  const hits = rc.intersectObject(o.meshNode, false);
-  if (!hits.length) return true;
-  return hits[0].distance >= dist - Math.max(1e-4, dist * 0.004);
+  const wp = new THREE.Vector3(...local).applyMatrix4(o.node.matrixWorld);
+  const screen = toScreen(wp);
+  if (screen.z<=-1 || screen.z>=1) return false;
+  const rc = screenRay(screen.x, screen.y), dist = rc.ray.origin.distanceTo(wp);
+  // Use the actual camera distance. A fixed 1000-unit orthographic ray made
+  // the old tolerance larger than small meshes, selecting their back vertices.
+  const tolerance = Math.max(1e-5, dist * 1e-6);
+  rc.far = dist + tolerance;
+  const hits = rc.intersectObjects(S.objects.filter(o => o.visible).map(o => o.meshNode), false);
+  return !hits.length || hits[0].distance >= dist - tolerance;
 }
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
@@ -7650,6 +7652,7 @@ function pickObject(x, y) {
       const r = distToSeg(x, y, SP[a * 4], SP[a * 4 + 1], SP[b * 4], SP[b * 4 + 1]);
       if (r.d < 22 && (!best || r.d < best.d)) best = { d: r.d, o };
     }
+    for (let v=0;v<o.mesh.verts.length;v++) if (!T.vertEdges[v].length && SP[v*4+3]) { const d=Math.hypot(SP[v*4]-x,SP[v*4+1]-y); if (d<22 && (!best || d<best.d) && pointVisible(o,o.mesh.verts[v])) best={d,o}; }
     if (!o.mesh.verts.length) { const s = toScreen(o.node.position); const d = Math.hypot(s.x - x, s.y - y); if (d < 22 && (!best || d < best.d)) best = { d, o }; }
   }
   return best ? best.o : null;
@@ -7764,7 +7767,7 @@ function snapshot() {
   };
 }
 function restore(snap) {
-  knifeReset();
+  knifeReset(); circleReset();
   const keep = new Map(S.objects.map((o) => [o.id, o]));
   const next = [];
   for (const so of snap.objects) {
@@ -8119,6 +8122,7 @@ function updateGuide(t) {
   requestRender();
 }
 function tfStart(kind, opts = {}) {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();
   const st = tfBuildState(kind);
@@ -8368,6 +8372,7 @@ function tfHideBar() {
 // ---- parameter modal: one value driven by horizontal drag (inset, loop cut slide, etc.) ----
 const PM = { active: null };
 function paramModal({ label, value = 0, min = -Infinity, max = Infinity, perPixel = 0.01, apply, onConfirm, onCancel, extra, undoLabel, hintText }) {
+  if (S.tool === 'circle') circleDone();
   if (TF.active) tfCancel();
   PM.active = { label, value, min, max, perPixel, apply, onConfirm, onCancel, extra, undoLabel, num: '' };
   pmShowBar();
@@ -8496,6 +8501,7 @@ function setLastOp(label, params, schema, fn) {
 }
 // run an operator: fn(params) mutates state, returns false on failure
 function runOp(label, fn, params = {}, schema = null) {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
@@ -8560,6 +8566,7 @@ function addPrimitive(type) {
 
 // ---------- extrude / duplicate ----------
 function activateExtrude() {
+  if (S.tool === 'circle') circleDone();
   if (!needEdit()) return;
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
@@ -8735,6 +8742,7 @@ function pickEdgeAny(x, y) {
   return el;
 }
 function opLoopCutStart() {
+  if (S.tool === 'circle') circleDone();
   if (!needEdit()) return;
   if (S.tool === 'knife') knifeCancel();
   S.pendingTap = 'loopcut';
@@ -8910,6 +8918,7 @@ function opTrisToQuads() {
 
 // ---------- selection operators ----------
 function opSelect(kind) {
+  if (S.tool === 'circle') circleDone();
   if (S.mode === 'object') {
     if (kind === 'all') for (const o of S.objects) if (o.visible) o.selected = true;
     if (kind === 'none') for (const o of S.objects) o.selected = false;
@@ -9163,6 +9172,7 @@ function opHide(kind) {
 
 // ---------- mode switching ----------
 function setMode(mode) {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
@@ -9734,7 +9744,7 @@ function serializeProject() {
 }
 async function loadProject(data) {
   if (!data || data.app !== 'PocketMesh' || !Array.isArray(data.objects)) throw new Error('This file is not a PocketMesh project');
-  knifeReset();
+  knifeReset(); circleReset();
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
@@ -9944,6 +9954,7 @@ async function importMaterialFiles(files) {
 const RULER = { first: null, hover: null };
 function rulerResetPending() { RULER.first = null; RULER.hover = null; requestRender(); }
 function rulerActivate() {
+  if (S.tool === 'circle') circleDone();
   if (TF.active) tfCancel(); if (PM.active) pmCancel();
   S.tool = 'ruler'; S.pendingTap = null; rulerResetPending(); closeSheet();
   buildTools(); buildSubbar(); gizmoSync(); hint('Ruler · tap the first point · drag to orbit');
@@ -10368,6 +10379,7 @@ function openTrackEditor() {
   ]);
 }
 function setWorkspace(workspace) {
+  if (S.tool === 'circle') circleDone();
   if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();
@@ -11562,6 +11574,131 @@ $('#fileSZSReplace').addEventListener('change', async (e) => {
   }
 });
 
+// ==== app_select.js ====
+// Circle selection paints a swept screen-space brush, so fast pointer events
+// cannot leave gaps. A stroke adds/removes; it never toggles the same item twice.
+const CIRCLE = {radius: 40, op: 'add', point: null, stroke: null};
+function circleActive() { return S.tool === 'circle' && S.workspace === 'model' && !isUVFocused() && !TF.active && !PM.active; }
+function circleCursor(point = CIRCLE.point) {
+  CIRCLE.point = point;
+  const el = $('#circleBrush');
+  el.hidden = !circleActive() || !point;
+  if (point) Object.assign(el.style, {left: point.x + 'px', top: point.y + 'px', width: CIRCLE.radius * 2 + 'px', height: CIRCLE.radius * 2 + 'px'});
+  el.classList.toggle('subtract', (CIRCLE.stroke?.op || CIRCLE.op) === 'sub');
+}
+function circleRadius(value) {
+  if (!Number.isFinite(value)) return;
+  CIRCLE.radius = clamp(Math.round(value), 8, 160);
+  settingsSet('circleRadius', CIRCLE.radius);
+  const input = $('#circleRadius'); if (input) input.value = CIRCLE.radius;
+  circleCursor();
+}
+function circleActivate() {
+  if (S.workspace !== 'model') return;
+  finishEditorInteraction(); closeSheet(); setEditorFocus('3d');
+  S.tool = 'circle'; S.pendingTap = null; G.lastTap = null;
+  CIRCLE.op = 'add'; CIRCLE.point = null;
+  rulerResetPending(); hideRedoPanel(); buildTools(); buildSubbar(); gizmoSync();
+  hint('Drag to paint selection · two fingers navigate · Done to finish');
+}
+function circleReset() {
+  CIRCLE.stroke = null; CIRCLE.point = null;
+  if (S.tool === 'circle') { S.tool = 'select'; hint(null); }
+  circleCursor();
+}
+function circleDone() {
+  circleEnd(false); circleReset(); hint(null);
+  buildTools(); buildSubbar(); gizmoSync();
+}
+function circleBegin(point, subtract) {
+  if (!circleActive() || (S.mode === 'edit' && !S.active)) return;
+  scene.updateMatrixWorld(true);
+  const objects = S.mode === 'edit' ? [S.active] : S.objects.filter(o => o.visible);
+  CIRCLE.stroke = {
+    mode: S.mode, selectMode: S.selectMode, op: subtract ? 'sub' : CIRCLE.op,
+    before: snapshot(), changed: false, last: point,
+    objects: objects.map(o => ({o, mesh: o.mesh, SP: projectMeshVerts(o), T: topo(o.mesh)})),
+  };
+  circlePaint(point);
+}
+// Nearest distance between a brush segment and an edge, with its edge parameter.
+function circleEdgeHit(a, b, from, to) {
+  const dx=b.x-a.x, dy=b.y-a.y, sx=to.x-from.x, sy=to.y-from.y;
+  const det=dx*sy-dy*sx;
+  if (Math.abs(det)>1e-10) {
+    const x=from.x-a.x, y=from.y-a.y, t=(x*sy-y*sx)/det, u=(x*dy-y*dx)/det;
+    if (t>=0 && t<=1 && u>=0 && u<=1) return {d:0,t};
+  }
+  const candidates=[distToSeg(from.x,from.y,a.x,a.y,b.x,b.y),distToSeg(to.x,to.y,a.x,a.y,b.x,b.y),
+    {d:distToSeg(a.x,a.y,from.x,from.y,to.x,to.y).d,t:0}, {d:distToSeg(b.x,b.y,from.x,from.y,to.x,to.y).d,t:1}];
+  return candidates.reduce((a,b)=>a.d<=b.d?a:b);
+}
+function circleEdgePoint(o, a, b, t) {
+  const project = v => new THREE.Vector4(...v,1).applyMatrix4(o.node.matrixWorld).applyMatrix4(camera.matrixWorldInverse).applyMatrix4(camera.projectionMatrix);
+  return vlerp(a,b,perspectiveEdgeParameter(t,project(a).w,project(b).w));
+}
+function circlePaint(point) {
+  const stroke=CIRCLE.stroke;
+  if (!stroke || !circleActive()) return;
+  const from=stroke.last, r=CIRCLE.radius;
+  const inside = (x,y) => distToSeg(x,y,from.x,from.y,point.x,point.y).d<=r;
+  const change = (set,key) => {
+    if (set.has(key) === (stroke.op !== 'sub')) return false;
+    stroke.op === 'sub' ? set.delete(key) : set.add(key); return true;
+  };
+  let changed=false;
+  for (const {o,mesh:m,SP,T} of stroke.objects) {
+    if (!S.objects.includes(o) || o.mesh!==m) continue;
+    const projected = v => ({x:SP[v*4],y:SP[v*4+1]});
+    const vertexHit = v => SP[v*4+3] && inside(SP[v*4],SP[v*4+1]) && pointVisible(o,m.verts[v]);
+    const edgeHit = ([a,b]) => {
+      if (!SP[a*4+3] || !SP[b*4+3]) return false;
+      const hit=circleEdgeHit(projected(a),projected(b),from,point);
+      return hit.d<=r && pointVisible(o,circleEdgePoint(o,m.verts[a],m.verts[b],hit.t));
+    };
+    if (stroke.mode==='edit') {
+      if (stroke.selectMode==='vert') {
+        for (let v=0;v<m.verts.length;v++) if (o.esel.verts.has(v)!==(stroke.op!=='sub') && vertexHit(v)) changed=change(o.esel.verts,v)||changed;
+      } else if (stroke.selectMode==='edge') {
+        for (const edge of T.edges) if (o.esel.edges.has(ekey(...edge))!==(stroke.op!=='sub') && edgeHit(edge)) changed=change(o.esel.edges,ekey(...edge))||changed;
+      } else {
+        m.faces.forEach((f,i)=>{
+          if (o.esel.faces.has(i)===(stroke.op!=='sub')) return;
+          const local=faceCenter(m,f), p=toScreen(new THREE.Vector3(...local).applyMatrix4(o.node.matrixWorld));
+          if (p.z>-1 && p.z<1 && inside(p.x,p.y) && pointVisible(o,local)) changed=change(o.esel.faces,i)||changed;
+        });
+      }
+      if (changed) flushSel(o);
+    } else {
+      if (o.selected === (stroke.op!=='sub')) continue;
+      let hit=m.verts.some((_,v)=>vertexHit(v)) || T.edges.some(edgeHit);
+      if (!hit && !m.verts.length) { const p=toScreen(o.node.position); hit=p.z>-1&&p.z<1&&inside(p.x,p.y); }
+      // Also catch a large face when the entire circle is inside its boundary.
+      if (!hit && m.faces.length) hit=screenRay(point.x,point.y).intersectObjects(S.objects.filter(o=>o.visible).map(o=>o.meshNode),false)[0]?.object===o.meshNode;
+      if (hit) { o.selected=stroke.op!=='sub'; if (o.selected) S.active=o; changed=true; }
+    }
+  }
+  stroke.changed ||= changed; stroke.last=point; circleCursor(point);
+  if (changed) onSelectionChanged();
+}
+function circleEnd(cancel) {
+  const stroke=CIRCLE.stroke; if (!stroke) return;
+  CIRCLE.stroke=null;
+  if (cancel) {
+    for (const old of stroke.before.objects) {
+      const o=S.objects.find(o=>o.id===old.id); if (!o) continue;
+      o.selected=old.selected; o.esel={verts:new Set(old.esel.verts),edges:new Set(old.esel.edges),faces:new Set(old.esel.faces)}; o.activeFace=old.activeFace;
+    }
+    S.active=S.objects.find(o=>o.id===stroke.before.active)||null;
+    onSelectionChanged();
+  } else if (stroke.changed) {
+    // Tap selections aren't history steps; keep their exact state for undo.
+    if (UNDO.idx>=0) UNDO.stack[UNDO.idx].snap=stroke.before;
+    LAST.op=null; hideRedoPanel(); pushUndo('Circle select');
+  }
+  circleCursor();
+}
+
 // ==== app_ui.js ====
 // ============================================================================
 // app_ui.js — header, tools, shelf, menus, panels, gestures, keyboard, boot
@@ -11694,6 +11831,7 @@ for (const b of document.querySelectorAll('#selModes button')) {
 const VIEW_CYCLE = ['3d', 'split', 'uv'];
 function isUVFocused() { return S.workspace === 'model' && (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')); }
 function finishEditorInteraction() {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
@@ -11756,6 +11894,20 @@ function buildSubbar() {
       chip('', 'Deselect', () => uvSelectAll('none')),
       chip('', 'Snap', () => { S.snap = !S.snap; settingsSet('snap', S.snap); buildSubbar(); }, {on: S.snap, icon: 'magnet', aria: 'Snap UV transforms'}),
       chip('', 'Fit view', uvFit));
+    return;
+  }
+  if (S.tool === 'circle') {
+    const size = h('input', {id: 'circleRadius', class: 'num', type: 'number', min: 8, max: 160, step: 2, value: CIRCLE.radius, 'aria-label': 'Circle radius in pixels'});
+    size.addEventListener('input', () => { const v=Number(size.value); if (v>=8 && v<=160) circleRadius(v); });
+    size.addEventListener('change', () => circleRadius(Number(size.value) || 40));
+    const mode = op => { circleEnd(false); CIRCLE.op=op; buildSubbar(); circleCursor(); };
+    bar.append(chip('', 'Done', circleDone, {primary: true, aria: 'Done circle selecting'}),
+      chip('', 'Add', () => mode('add'), {on: CIRCLE.op==='add', aria: 'Circle add selection'}),
+      chip('', 'Remove', () => mode('sub'), {on: CIRCLE.op==='sub', aria: 'Circle remove selection'}),
+      h('label', {class: 'chip'}, 'Radius', size),
+      chip('', '−', () => circleRadius(CIRCLE.radius-8), {aria: 'Smaller selection circle'}),
+      chip('', '+', () => circleRadius(CIRCLE.radius+8), {aria: 'Larger selection circle'}));
+    bar.scrollLeft=0;
     return;
   }
   if (S.tool === 'knife') {
@@ -11828,11 +11980,13 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  const modelTools = S.mode === 'edit' ? [...TOOLS3D.slice(0,4), ['knife', 'knife', 'Knife tool · K'], ['inset', 'inset', 'Inset faces · I'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : TOOLS3D;
+  circleCursor();
+  const selectionTools = [...TOOLS3D.slice(0,2), ['circle','circleSelect','Circle select · C'], ...TOOLS3D.slice(2,4)];
+  const modelTools = S.mode === 'edit' ? [...selectionTools, ['knife', 'knife', 'Knife tool · K'], ['inset', 'inset', 'Inset faces · I'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : [...selectionTools,...TOOLS3D.slice(4)];
   for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'circle') { circleActivate(); return; } if (S.tool === 'circle') circleDone(); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   if (S.workspace === 'model') col.append(h('hr'), h('button', {
@@ -12025,7 +12179,8 @@ function menuSelect() {
     { label: 'More', icon: 'plus', key: 'Ctrl +', run: () => opSelect('more') },
     { label: 'Less', icon: 'minus', key: 'Ctrl −', run: () => opSelect('less') },
     { group: 'Pick' },
-    { label: 'Edge Loop…', icon: 'loopcut', desc: 'Then tap an edge (or double-tap any edge)', run: () => opSelect('loop') },
+    { label: 'Circle Select', icon: 'circleSelect', key: 'C', desc: 'Drag to paint a selection', run: circleActivate },
+    { label: 'Edge Loop…', icon: 'loopcut', desc: 'Tap a wire or surface edge; double-tap surface edges in Edge mode', run: () => opSelect('loop') },
     { label: 'Edge Ring…', icon: 'subdivide', desc: 'Then tap an edge', run: () => opSelect('ring') },
     { label: 'Boundary Loop', icon: 'select', desc: 'Outline of the selected faces', run: () => opSelect('boundary') },
   ]);
@@ -12183,6 +12338,7 @@ function confirmNew() {
   });
 }
 function newScene() {
+  circleReset();
   if (TF.active) tfCancel(); if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
@@ -12613,7 +12769,8 @@ function openHelp() {
       tip('Axis ball (top right)', 'tap an axis for front, side or top view; tap again for the opposite side.'),
       tip('Move / Rotate / Scale', 'tools on the left show handles you drag directly. In 3D, keyboard G / R / S starts a transform: drag, lock X / Y / Z, type a number, then Done.'),
       tip('Edit Mode', 'models the active object. Pick vertex, edge or face selection at the top.'),
-      tip('Double-tap an edge', 'selects its whole edge loop.'),
+      tip('Circle select (C)', 'drag to paint vertices, edges, face centers or objects. Radius changes the brush size; Remove erases selection. Wheel or +/− resizes, middle mouse or Shift-drag removes, Done/Enter/Escape finishes. Two fingers still navigate.'),
+      tip('Double-tap a surface edge', 'in Edge mode selects its whole edge loop. Loose edges and vertex picks stay individual; use Select → Edge Loop explicitly for wire chains.'),
       tip('Set / Add / Sub', 'controls whether taps and box selections replace, add to or remove from the selection.'),
       tip('Adjust Last Operation', 'appears bottom-left after adding shapes or using tools: change segments, cuts, margins and more.'),
       tip('Multiselect', 'Hold a vertex, edge, face or object for a moment, then tap to add or remove more. Tap Done in the top bar to finish.'),
@@ -12645,6 +12802,7 @@ hideRedoPanel = () => { $('#redo').hidden = true; };
 
 // ---------- hooks ----------
 onSelectionChanged = () => {
+  circleCursor();
   if (S.tool === 'knife' && !knifeActive()) knifeCancel();
   trackRefresh();
   for (const o of S.objects) refreshOverlays(o);
@@ -12674,7 +12832,7 @@ onHistoryChanged = () => {
 };
 afterRestore = () => { onModeChanged(); onSelectionChanged(); buildSubbar(); };
 const _origSetSelectMode = setSelectMode;
-setSelectMode = function (m) { _origSetSelectMode(m); onModeChanged(); };
+setSelectMode = function (m) { circleEnd(false); G.lastTap = null; _origSetSelectMode(m); onModeChanged(); };
 
 // ---------- 3D viewport gestures ----------
 const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastTap: null };
@@ -12707,6 +12865,7 @@ c3d.addEventListener('contextmenu', (e) => e.preventDefault());
 c3d.addEventListener('pointerdown', (e) => {
   cancelHold();
   setEditorFocus('3d');
+  if (circleActive() && e.pointerType === 'mouse' && e.button === 2) { circleDone(); e.preventDefault(); return; }
   if (tc.enabled && (tc.dragging || tc.axis)) return;
   if (document.activeElement && document.activeElement.blur && document.activeElement !== document.body) document.activeElement.blur();
   try { c3d.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
@@ -12716,7 +12875,9 @@ c3d.addEventListener('pointerdown', (e) => {
   if (G.p.size === 1) {
     G.t0 = performance.now(); G.moved = false; G.maxPointers = 1;
     G.extrudeCandidate = false;
-    if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
+    if (circleActive() && !e.altKey && (e.button === 0 || e.button === 1)) { G.mode='circle'; circleBegin(p, e.button===1 || e.shiftKey); }
+    else if (circleActive() && e.altKey) G.mode=e.shiftKey ? 'pan' : 'orbit';
+    else if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
     else if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
@@ -12725,6 +12886,7 @@ c3d.addEventListener('pointerdown', (e) => {
       beginHold(e, p);
     }
   } else if (G.p.size === 2) {
+    circleEnd(true); circleCursor(null);
     if (TF.active?.quickExtrude) tfCancel();
     G.extrudeCandidate = false;
     if (G.mode === 'box') { $('#boxrect').hidden = true; }
@@ -12734,6 +12896,7 @@ c3d.addEventListener('pointerdown', (e) => {
 c3d.addEventListener('pointermove', (e) => {
   const p = rel(e);
   if (!G.p.has(e.pointerId)) {
+    if (circleActive() && G.p.size === 0) circleCursor(p);
     if (knifeActive() && G.p.size === 0) { KNIFE.hover = knifePick(p.x, p.y, 18); requestRender(); }
     if (S.tool === 'ruler' && G.p.size === 0 && !TF.active && !PM.active) { RULER.hover = rulerPick(p.x,p.y,18); requestRender(); }
     // desktop: modal transforms follow the hovering mouse like Blender
@@ -12765,6 +12928,7 @@ c3d.addEventListener('pointermove', (e) => {
     G.two = t; CAM.viewName = CAM.ortho && CAM.autoOrtho && !G.twisting ? CAM.viewName : null;
     return;
   }
+  if (G.mode === 'circle') { circlePaint(p); return; }
   if (G.mode === 'pending' && G.moved) {
     if (TF.active) G.mode = 'tf';
     else if (PM.active) G.mode = 'pm';
@@ -12796,6 +12960,11 @@ function endPointer(e) {
   G.p.delete(e.pointerId);
   if (G.p.size > 0) { if (G.mode === 'two' && G.p.size === 1) G.mode = 'none'; return; }
   const quick = performance.now() - G.t0 < 320;
+  if (G.mode === 'circle') {
+    if (e.type === 'pointerup') circlePaint(rel(e));
+    circleEnd(e.type !== 'pointerup');
+    if (pt.type !== 'mouse') circleCursor(null);
+  }
   if (G.mode === 'quickExtrude' && TF.active?.quickExtrude) {
     if (e.type === 'pointerup') tfConfirm(); else tfCancel();
   }
@@ -12813,10 +12982,11 @@ function endPointer(e) {
 c3d.addEventListener('pointerup', endPointer);
 c3d.addEventListener('pointercancel', endPointer);
 c3d.addEventListener('lostpointercapture', endPointer);
-function cancelViewportGesture() { cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
+function cancelViewportGesture() { circleEnd(true); circleCursor(null); cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
 window.addEventListener('blur', cancelViewportGesture);
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
-c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
+c3d.addEventListener('pointerleave', () => { if (!CIRCLE.stroke) circleCursor(null); });
+c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (circleActive()) { circleRadius(CIRCLE.radius + (e.deltaY < 0 ? 4 : -4)); return; } if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('gesturechange', (e) => e.preventDefault());
 
@@ -12830,13 +13000,19 @@ function handleTap(x, y, ptype) {
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
   if (S.tool === 'ruler') { rulerTap(x,y,radius); return; }
   if (S.tool === 'cursor') { placeCursor(x, y); return; }
-  const now = performance.now();
-  const dbl = S.tool !== 'extrude' && !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
-  G.lastTap = { t: now, x, y };
+  const now = performance.now(), previous = G.lastTap;
+  G.lastTap = null;
   if (S.mode === 'edit' && S.active) {
-    if (dbl && S.selectMode !== 'vert') { G.lastTap = null; loopSelectAt(x, y, 'loop', S.selOp === 'sub' ? 'sub' : 'add'); return; }
-    if (dbl && S.selectMode === 'vert') { const el = pickEdgeAny(x, y); if (el) { G.lastTap = null; loopSelectAt(x, y, 'loop', 'add'); return; } }
     const el = pickElement(x, y, radius);
+    // Never turn rapid vertex/loose-edge taps into a whole wire-chain pick.
+    // Surface loop gestures require the same edge in the same object/mode.
+    if (el?.type === 'edge' && S.tool !== 'extrude' && !S.multiSelect) {
+      const T=topo(S.active.mesh), surface=T.edgeFaces[T.edgeIndex.get(el.key)]?.length;
+      if (surface && previous?.object===S.active && previous.key===el.key && now-previous.t<350 && Math.hypot(x-previous.x,y-previous.y)<24) {
+        loopSelectAt(x,y,'loop',S.selOp==='sub'?'sub':'add'); return;
+      }
+      if (surface) G.lastTap={t:now,x,y,key:el.key,object:S.active};
+    }
     if (el) toggleInSel(el, S.selOp);
     else if (S.selOp === 'set') S.active.esel = emptySel();
     onSelectionChanged();
@@ -12997,6 +13173,13 @@ document.addEventListener('keydown', (e) => {
     if (k === 'Tab') { e.preventDefault(); knifeCancel(); setMode('object'); return; }
     if (!e.code?.startsWith('Numpad') && k !== 'Home') return;
   }
+  if (circleActive()) {
+    if (['Escape','Enter'].includes(k)) { e.preventDefault(); circleDone(); return; }
+    if (['+','=','-','[',']'].includes(k) || ['NumpadAdd','NumpadSubtract'].includes(e.code)) {
+      e.preventDefault(); circleRadius(CIRCLE.radius+(['-','['].includes(k)||e.code==='NumpadSubtract' ? -4 : 4)); return;
+    }
+    if (ctrl && k.toLowerCase()==='z' && CIRCLE.stroke) { e.preventDefault(); circleEnd(true); return; }
+  }
   if (ctrl && (k === 'z' || k === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (ctrl && k === 'y') { e.preventDefault(); redo(); return; }
   if (isUVFocused()) {
@@ -13051,6 +13234,7 @@ document.addEventListener('keydown', (e) => {
   if (ctrl && k === '-' && edit) { e.preventDefault(); opSelect('less'); return; }
   if (ctrl || e.altKey) return;
   switch (lk) {
+    case 'c': circleActivate(); break;
     case 'g': tfStart('move'); break;
     case 'r': tfStart('rotate'); break;
     case 's': tfStart('scale'); break;
@@ -13071,6 +13255,8 @@ document.addEventListener('keydown', (e) => {
 
 // ---------- boot ----------
 function loadSettings() {
+  const circleSize = Number(settingsGet('circleRadius', 40));
+  CIRCLE.radius = Number.isFinite(circleSize) ? clamp(circleSize, 8, 160) : 40;
   S.extrudeQuick = settingsGet('extrudeQuick', true) !== false;
   S.extrudeVerticesOnly = settingsGet('extrudeVerticesOnly', false) === true;
   S.extrudeTap = settingsGet('extrudeTap', false) === true;
@@ -13118,7 +13304,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { CIRCLE, circleActivate, circleDone, pickElement, toggleInSel, KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

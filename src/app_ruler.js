@@ -2,6 +2,7 @@
 const RULER = { first: null, hover: null };
 function rulerResetPending() { RULER.first = null; RULER.hover = null; requestRender(); }
 function rulerActivate() {
+  if (S.tool === 'circle') circleDone();
   if (TF.active) tfCancel(); if (PM.active) pmCancel();
   S.tool = 'ruler'; S.pendingTap = null; rulerResetPending(); closeSheet();
   buildTools(); buildSubbar(); gizmoSync(); hint('Ruler · tap the first point · drag to orbit');

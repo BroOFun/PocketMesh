@@ -11,6 +11,7 @@ function setLastOp(label, params, schema, fn) {
 }
 // run an operator: fn(params) mutates state, returns false on failure
 function runOp(label, fn, params = {}, schema = null) {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
@@ -75,6 +76,7 @@ function addPrimitive(type) {
 
 // ---------- extrude / duplicate ----------
 function activateExtrude() {
+  if (S.tool === 'circle') circleDone();
   if (!needEdit()) return;
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
@@ -250,6 +252,7 @@ function pickEdgeAny(x, y) {
   return el;
 }
 function opLoopCutStart() {
+  if (S.tool === 'circle') circleDone();
   if (!needEdit()) return;
   if (S.tool === 'knife') knifeCancel();
   S.pendingTap = 'loopcut';
@@ -425,6 +428,7 @@ function opTrisToQuads() {
 
 // ---------- selection operators ----------
 function opSelect(kind) {
+  if (S.tool === 'circle') circleDone();
   if (S.mode === 'object') {
     if (kind === 'all') for (const o of S.objects) if (o.visible) o.selected = true;
     if (kind === 'none') for (const o of S.objects) o.selected = false;
@@ -678,6 +682,7 @@ function opHide(kind) {
 
 // ---------- mode switching ----------
 function setMode(mode) {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();

@@ -134,7 +134,7 @@ function serializeProject() {
 }
 async function loadProject(data) {
   if (!data || data.app !== 'PocketMesh' || !Array.isArray(data.objects)) throw new Error('This file is not a PocketMesh project');
-  knifeReset();
+  knifeReset(); circleReset();
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
