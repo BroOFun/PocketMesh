@@ -281,10 +281,10 @@ function buildTools() {
   circleCursor();
   const selectionTools = [...TOOLS3D.slice(0,2), ['circle','circleSelect','Circle select · C'], ...TOOLS3D.slice(2,4)];
   const modelTools = S.mode === 'edit' ? [...selectionTools, ['knife', 'knife', 'Knife tool · K'], ['inset', 'inset', 'Inset faces · I'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : [...selectionTools,...TOOLS3D.slice(4)];
-  for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
+  for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['checkpoints','checkpoint','Checkpoints'],['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'circle') { circleActivate(); return; } if (S.tool === 'circle') circleDone(); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'circle') { circleActivate(); return; } if (S.tool === 'circle') circleDone(); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && t[0]==='checkpoints') { checkpointActivate();return; } if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   if (S.workspace === 'model') col.append(h('hr'), h('button', {
@@ -641,6 +641,7 @@ function newScene() {
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
   S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
+  checkpointCancel();CHECKPOINT.selected=-1;CHECKPOINT.group=0;
   S.track = normalizeTrack();
   S.cursor.set(0, 0, 0); S.ruler = normalizeRuler(); rulerResetPending();
   const mat = newMaterial('Material', '#c9ccd2');
@@ -1177,6 +1178,8 @@ c3d.addEventListener('pointerdown', (e) => {
     else if (circleActive() && e.altKey) G.mode=e.shiftKey ? 'pan' : 'orbit';
     else if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
     else if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
+    else if (checkpointActive() && !e.altKey && e.button===0) { G.mode='checkpoint';checkpointBegin(p); }
+    else if (checkpointActive() && e.altKey) G.mode=e.shiftKey?'pan':'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
     if (G.mode === 'pending') {
@@ -1184,7 +1187,7 @@ c3d.addEventListener('pointerdown', (e) => {
       beginHold(e, p);
     }
   } else if (G.p.size === 2) {
-    circleEnd(true); circleCursor(null);
+    checkpointCancel();circleEnd(true); circleCursor(null);
     if (TF.active?.quickExtrude) tfCancel();
     G.extrudeCandidate = false;
     if (G.mode === 'box') { $('#boxrect').hidden = true; }
@@ -1231,6 +1234,7 @@ c3d.addEventListener('pointermove', (e) => {
     G.two = t; CAM.viewName = CAM.ortho && CAM.autoOrtho && !G.twisting ? CAM.viewName : null;
     return;
   }
+  if (G.mode === 'checkpoint') { checkpointMove(p);return; }
   if (G.mode === 'circle') { circlePaint(p); return; }
   if (G.mode === 'pending' && G.moved) {
     if (TF.active) G.mode = 'tf';
@@ -1262,6 +1266,7 @@ function endPointer(e) {
   const pt = G.p.get(e.pointerId);
   G.p.delete(e.pointerId);
   if (G.p.size > 0) { if (G.mode === 'two' && G.p.size === 1) G.mode = 'none'; return; }
+  if(G.mode==='checkpoint')checkpointEnd(rel(e),e.type!=='pointerup');
   const quick = performance.now() - G.t0 < 320;
   if (G.mode === 'circle') {
     if (e.type === 'pointerup') circlePaint(rel(e));
@@ -1285,7 +1290,7 @@ function endPointer(e) {
 c3d.addEventListener('pointerup', endPointer);
 c3d.addEventListener('pointercancel', endPointer);
 c3d.addEventListener('lostpointercapture', endPointer);
-function cancelViewportGesture() { circleEnd(true); circleCursor(null); cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
+function cancelViewportGesture() { checkpointCancel();circleEnd(true); circleCursor(null); cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
 window.addEventListener('blur', cancelViewportGesture);
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
 c3d.addEventListener('pointerleave', () => { if (!CIRCLE.stroke) circleCursor(null); });
@@ -1507,6 +1512,10 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'NumpadDecimal') { frameSelected(); return; }
   }
   if (S.workspace !== 'model') {
+    if(checkpointActive()) {
+      if(k==='Delete'||k==='Backspace'){e.preventDefault();checkpointDelete();return;}
+      if(k==='Home'){checkpointFocus(true);return;}
+    }
     if (k === 'Home') { S.workspace === 'kmp' && S.track.start ? trackFocusStart() : frameSelected(); return; }
     if (k === 'Escape') { trackTool('select'); return; }
     if (!ctrl && !e.altKey) { const tool = {g:'move',r:'rotate',s:'scale'}[k.toLowerCase()]; if (tool && !(S.workspace === 'kmp' && tool === 'scale')) trackTool(tool); }
@@ -1607,7 +1616,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { CIRCLE, circleActivate, circleDone, pickElement, toggleInSel, KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { CHECKPOINT, checkpointActivate, checkpointTopView, checkpointScreen, checkpointConnections, checkpointWarnings, openCheckpoints, CIRCLE, circleActivate, circleDone, pickElement, toggleInSel, KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

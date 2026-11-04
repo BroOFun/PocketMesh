@@ -6391,7 +6391,7 @@ function exportKCL(input, { thickness = 300, radius = 250 } = {}) {
 }
 
 // ==== kmp.js ====
-// KMP v2520 (RKMD), big endian. Preserves imported sections byte-for-byte.
+// KMP v2520 (RKMD), big endian. Preserves untouched imported sections byte-for-byte.
 // https://mkwiiki.org/wiki/KMP_(File_Format)
 const _KP_NAMES = [
   'KTPT',
@@ -6435,6 +6435,7 @@ function normalizeTrack(data = {}) {
     clearance: Number.isFinite(data.clearance) ? Math.max(0, Math.min(100, data.clearance)) : 0.2,
     template: typeof data.template === 'string' ? data.template : null,
     templateName: typeof data.templateName === 'string' ? data.templateName : '',
+    checkpoints: data.checkpoints ? cloneCheckpoints(data.checkpoints) : null,
   };
 }
 function trackToWii(p, scale = 1) {
@@ -6442,6 +6443,86 @@ function trackToWii(p, scale = 1) {
 }
 function trackFromWii(p, scale = 1) {
   return [p[0] / scale, -p[2] / scale, p[1] / scale];
+}
+// Editor endpoints use horizontal X/Y. Height is an editor display hint only;
+// CKPT gates extend vertically and contain no height coordinate in the file.
+function cloneCheckpoints(data) {
+  if (!Array.isArray(data.points) || !Array.isArray(data.groups)) throw new Error('Invalid checkpoint data');
+  const pair = p => {
+    if (!Array.isArray(p) || p.length !== 2 || !p.every(Number.isFinite)) throw new Error('Invalid checkpoint coordinates');
+    return p.slice();
+  };
+  const byte = n => {
+    if (!Number.isInteger(n) || n < 0 || n > 255) throw new Error('Invalid checkpoint index or type');
+    return n;
+  };
+  return {
+    points: data.points.map(p => ({left:pair(p.left), right:pair(p.right), type:byte(p.type), respawn:byte(p.respawn), prev:byte(p.prev), next:byte(p.next), height:Number.isFinite(p.height)?p.height:0})),
+    groups: data.groups.map(g => {
+      if (!Array.isArray(g.prev) || !Array.isArray(g.next) || g.prev.length > 6 || g.next.length > 6) throw new Error('Invalid checkpoint group links');
+      return {start:byte(g.start),count:byte(g.count),prev:g.prev.map(byte),next:g.next.map(byte),padding:(g.padding||0)&65535};
+    }),
+    extra: [(data.extra?.[0]||0)&65535,(data.extra?.[1]||0)&65535],
+    dirty: !!data.dirty,
+  };
+}
+function checkpointsFromKMP(parsed, scale = 1, height = 0) {
+  const data = cloneCheckpoints(parsed.checkpoints);
+  for (const p of data.points) {
+    p.left = [p.left[0]/scale,-p.left[1]/scale];
+    p.right = [p.right[0]/scale,-p.right[1]/scale];
+    p.height = height;
+  }
+  return data;
+}
+// Rebuild sequence indices only after insertion/deletion/reordering. Imported
+// group connections are kept, including branches and alternate routes.
+function relinkCheckpoints(data) {
+  let start = 0;
+  for (const g of [...data.groups].sort((a,b)=>a.start-b.start)) {
+    g.start = start;
+    for (let j=0;j<g.count;j++) {
+      const p=data.points[start+j];
+      p.prev=j===0?255:start+j-1;
+      p.next=j===g.count-1?255:start+j+1;
+    }
+    start += g.count;
+  }
+  data.dirty = true;
+}
+function checkpointConnections(data) {
+  const links = [];
+  for (const g of data.groups) {
+    for(let j=0;j<g.count-1;j++) links.push([g.start+j,g.start+j+1]);
+    for(const next of g.next) if(next!==255 && data.groups[next]?.count && g.count)
+      links.push([g.start+g.count-1,data.groups[next].start]);
+  }
+  return links;
+}
+function checkpointWarnings(data) {
+  const messages=[], points=data.points;
+  const laps=points.filter(p=>p.type===0).length;
+  if(laps!==1) messages.push(laps?'Use one lap checkpoint for reliable lap counting.':'Add a lap checkpoint at the start/finish line.');
+  const keys=[...new Set(points.filter(p=>p.type>0&&p.type<255).map(p=>p.type))].sort((a,b)=>a-b);
+  if(!keys.length) messages.push('Add key checkpoints around the route.');
+  else if(keys.some((n,i)=>n!==i+1)) messages.push('Key IDs should run from 1 upward without gaps.');
+  if(keys.some(n=>n>127)) messages.push('Key IDs above 127 are not recommended.');
+  if(data.groups.length===1 && laps===1) {
+    const lap=points.findIndex(p=>p.type===0),order=[];
+    for(let j=1;j<points.length;j++){const t=points[(lap+j)%points.length].type;if(t>0&&t<255)order.push(t);}
+    if(order.some((n,i)=>n!==i+1))messages.push('Key IDs are out of driving order. Use Number keys in order.');
+  }
+  let invalid=0;
+  for(const [a,b] of checkpointConnections(data)) {
+    if(!points[a]||!points[b]) continue;
+    const quad=[points[a].left,points[a].right,points[b].right,points[b].left];
+    if(quad.some((p,i)=>{
+      const q=quad[(i+1)%4],r=quad[(i+2)%4];
+      return (q[0]-p[0])*(r[1]-q[1])-(q[1]-p[1])*(r[0]-q[0])<=0;
+    })) invalid++;
+  }
+  if(invalid) messages.push(`${invalid} route connection${invalid===1?'':'s'} cross, fold, or face backward. Adjust endpoints, order, or direction.`);
+  return messages;
 }
 function inspectKMP(input) {
   const bytes = input instanceof Uint8Array ? Uint8Array.from(input) : new Uint8Array(input),
@@ -6483,7 +6564,22 @@ function inspectKMP(input) {
       if (![...start.position, ...start.rotation].every(Number.isFinite)) throw new Error('Invalid KTPT coordinates');
     }
   }
-  return { bytes, sections, start, version };
+  const checkpoints = {points:[],groups:[],extra:[0,0],dirty:false};
+  for(const [name,stride] of [['CKPT',20],['CKPH',16]]) {
+    const section=sections.find(s=>s.name===name);
+    if(!section) continue;
+    if(section.bytes.length<8+section.count*stride) throw new Error('Truncated '+name+' section');
+    checkpoints.extra[name==='CKPT'?0:1]=section.extra;
+    for(let i=0;i<section.count;i++) {
+      const o=section.offset+8+i*stride;
+      if(name==='CKPT') {
+        const coords=[0,4,8,12].map(j=>v.getFloat32(o+j));
+        if(!coords.every(Number.isFinite)) throw new Error('Invalid CKPT coordinates');
+        checkpoints.points.push({left:coords.slice(0,2),right:coords.slice(2),respawn:bytes[o+16],type:bytes[o+17],prev:bytes[o+18],next:bytes[o+19],height:0});
+      } else checkpoints.groups.push({start:bytes[o],count:bytes[o+1],prev:Array.from(bytes.slice(o+2,o+8)),next:Array.from(bytes.slice(o+8,o+14)),padding:v.getUint16(o+14)});
+    }
+  }
+  return { bytes, sections, start, version, checkpoints };
 }
 // Original temporary drive-test scaffold, not a route fitted to the model.
 // A linked loop avoids the game dereferencing empty path/checkpoint groups.
@@ -6572,7 +6668,7 @@ function _kpTestSections(start, scale) {
   });
   return sections;
 }
-function exportKMP(start, { scale = 1, template = null } = {}) {
+function exportKMP(start, { scale = 1, template = null, checkpoints = null } = {}) {
   if (
     !start ||
     !start.position ||
@@ -6601,6 +6697,7 @@ function exportKMP(start, { scale = 1, template = null } = {}) {
   const kv = new DataView(section.bytes.buffer, section.bytes.byteOffset, section.bytes.byteLength);
   trackToWii(start.position, scale).forEach((n, i) => kv.setFloat32(8 + i * 4, n));
   start.rotation.forEach((n, i) => kv.setFloat32(20 + i * 4, n));
+  if (checkpoints?.dirty) _kpWriteCheckpoints(sections, checkpoints, scale);
   const header = 16 + sections.length * 4,
     size = header + sections.reduce((n, s) => n + s.bytes.length, 0),
     bytes = new Uint8Array(size),
@@ -6617,6 +6714,41 @@ function exportKMP(start, { scale = 1, template = null } = {}) {
     pos += s.bytes.length;
   });
   return bytes;
+}
+function _kpWriteCheckpoints(sections, input, scale) {
+  const data=cloneCheckpoints(input), n=data.points.length;
+  if(!n) throw new Error('Draw checkpoints before exporting, or use the automatic test setup');
+  if(n>255 || !data.groups.length || data.groups.length>255) throw new Error('Checkpoint editing supports up to 255 checkpoints and groups');
+  const used=new Set();
+  for(const g of data.groups) {
+    if(!g.count || g.start+g.count>n || [...g.prev,...g.next].some(i=>i!==255&&i>=data.groups.length)) throw new Error('Invalid checkpoint group range or connection');
+    for(let i=g.start;i<g.start+g.count;i++) {if(used.has(i)) throw new Error('Overlapping checkpoint groups');used.add(i);}
+  }
+  if(used.size!==n) throw new Error('Every checkpoint needs a group');
+  const respawns=sections.find(s=>s.name==='JGPT');
+  const respawnCount=respawns?new DataView(respawns.bytes.buffer,respawns.bytes.byteOffset).getUint16(4):0;
+  for(const p of data.points) {
+    if(p.respawn>=respawnCount) throw new Error('Checkpoint respawn index is missing from this KMP');
+    if(Math.hypot(p.right[0]-p.left[0],p.right[1]-p.left[1])<1e-7) throw new Error('Checkpoint endpoints must be apart');
+    if([p.prev,p.next].some(i=>i!==255&&i>=n)) throw new Error('Invalid checkpoint sequence index');
+    if(![...p.left,...p.right].every(v=>Number.isFinite(Math.fround(v*scale)))) throw new Error('Checkpoint coordinates exceed the KMP number range');
+    if(p.left.every((v,i)=>Math.fround(v*scale)===Math.fround(p.right[i]*scale))) throw new Error('Checkpoint endpoints are too close at these coordinates');
+  }
+  for(const [name,count,stride,extra] of [['CKPT',n,20,data.extra[0]],['CKPH',data.groups.length,16,data.extra[1]]]) {
+    const bytes=new Uint8Array(8+count*stride),v=new DataView(bytes.buffer);
+    bytes.set(Array.from(name,c=>c.charCodeAt(0)));v.setUint16(4,count);v.setUint16(6,extra);
+    if(name==='CKPT') data.points.forEach((p,i)=>{
+      const o=8+i*20;
+      [p.left[0]*scale,-p.left[1]*scale,p.right[0]*scale,-p.right[1]*scale].forEach((x,j)=>v.setFloat32(o+j*4,x));
+      bytes.set([p.respawn,p.type,p.prev,p.next],o+16);
+    });
+    else data.groups.forEach((g,i)=>{
+      const o=8+i*16;bytes[o]=g.start;bytes[o+1]=g.count;bytes.fill(255,o+2,o+14);
+      bytes.set(g.prev,o+2);bytes.set(g.next,o+8);v.setUint16(o+14,g.padding);
+    });
+    const existing=sections.find(s=>s.name===name);
+    if(existing) existing.bytes=bytes; else sections.push({name,bytes});
+  }
 }
 
 // ==== szs.js ====
@@ -6968,6 +7100,7 @@ const ICONS = {
   dots: '<circle cx="5.5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="18.5" cy="12" r="1.4" fill="currentColor"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>',
   tri: '<path d="M4 19 12 5l8 14z"/><path d="M12 19V5M8 12h8" stroke-opacity=".55"/>',
+  checkpoint: '<path d="M4 16h16M12 16V4m-4 4 4-4 4 4"/><circle cx="4" cy="16" r="2"/><circle cx="20" cy="16" r="2"/>',
   grid: '<path d="M4 4h16v16H4zM4 9.3h16M4 14.6h16M9.3 4v16M14.6 4v16"/>',
   hide: '<path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z" stroke-opacity=".35"/><path d="M4 20 20 4"/>',
   stretch: '<rect x="3.5" y="3.5" width="17" height="17" rx="1"/><path d="M3.5 3.5h8.5v8.5H3.5z" fill="#4b9df6" fill-opacity=".5" stroke="none"/><path d="M12 12h8.5v8.5H12z" fill="#f2506b" fill-opacity=".5" stroke="none"/>',
@@ -7834,6 +7967,7 @@ function restore(snap) {
   S.mode = S.workspace === 'model' && snap.mode === 'edit' && S.active ? 'edit' : 'object';
   S.selectMode = snap.selectMode;
   S.cursor.fromArray(snap.cursor);
+  checkpointCancel();
   S.track = normalizeTrack(snap.track);
   S.ruler = normalizeRuler(snap.ruler); rulerResetPending();
   S.uvSel = new Set(snap.uvSel);
@@ -9786,6 +9920,8 @@ function serializeProject() {
 }
 async function loadProject(data) {
   if (!data || data.app !== 'PocketMesh' || !Array.isArray(data.objects)) throw new Error('This file is not a PocketMesh project');
+  const track = normalizeTrack(data.track || {scale: settingsGet('export', {}).scale});
+  checkpointCancel();CHECKPOINT.selected=-1;CHECKPOINT.group=0;
   knifeReset(); circleReset();
   if (TF.active) tfCancel();
   if (PM.active) pmCancel();
@@ -9793,7 +9929,7 @@ async function loadProject(data) {
   clearImages();
   S.objects = []; S.materials = [];
   S.active = null; S.mode = 'object'; S.multiSelect = false; S.selOp = 'set';
-  S.track = normalizeTrack(data.track || {scale: settingsGet('export', {}).scale});
+  S.track = track;
   S.ruler = normalizeRuler(data.ruler); rulerResetPending();
   for (const im of data.images || []) { try { await imageFromBytes(im.id, im.name, im.mime, bytesFromB64(im.data)); } catch (e) { console.warn('image failed', im.name, e); } }
   for (const m of data.materials || []) { S.materials.push({ roughness: 0.5, metalness: 0, alpha: 1, filter: 'linear', texture: null, useTexture: true, tint: false, wrap: 'repeat', ...m }); if (m.id >= _matNid) _matNid = m.id + 1; }
@@ -10416,11 +10552,12 @@ function openTrackEditor() {
   menuSheet('Track Editor', [
     {label: 'Course Model', icon: 'cube', desc: 'Model geometry, BRRES resources and textures', run: () => { setWorkspace('model'); openBRRESEditor(); }},
     {label: 'KCL', icon: 'layers', desc: 'Collision materials and road types', run: () => setWorkspace('kcl')},
-    {label: 'KMP', icon: 'cursor', desc: 'Start position and driving direction', run: () => setWorkspace('kmp')},
+    {label: 'KMP', icon: 'cursor', desc: 'Start position, direction and checkpoints', run: () => setWorkspace('kmp')},
     {label: 'SZS', icon: 'folder', desc: 'Track archive and file replacement', run: openSZSEditor},
   ]);
 }
 function setWorkspace(workspace) {
+  checkpointCancel();
   if (S.tool === 'circle') circleDone();
   if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
   if (S.tool === 'knife') knifeCancel();
@@ -10451,6 +10588,7 @@ function setWorkspace(workspace) {
   );
 }
 function trackSubbar(bar) {
+  if(checkpointActive()) {checkpointControls(bar);return true;}
   const menu = trackButton('Track Editor ▾', openTrackEditor);
   menu.setAttribute('aria-label', 'Track Editor');
   bar.append(menu, h('span', {class: 'muted', style: {whiteSpace: 'nowrap'}}, S.workspace === 'model' ? 'Course Model' : S.workspace.toUpperCase()));
@@ -10459,6 +10597,9 @@ function trackSubbar(bar) {
     trackButton(S.workspace === 'kcl' ? 'Materials & flags' : 'Start point', S.workspace === 'kcl' ? openKCL : openKMP),
     trackButton('Export ' + S.workspace.toUpperCase(), () => trackExport(S.workspace)),
   );
+  if(S.workspace==='kmp') {
+    bar.append(trackButton('Checkpoints',()=>checkpointActivate()));
+  }
   return true;
 }
 function buildTrackShelf(sh) {
@@ -10471,6 +10612,7 @@ function buildTrackShelf(sh) {
     );
   else
     sh.append(
+      shelfBtn('Checkpoints', 'checkpoint', () => checkpointActivate()),
       shelfBtn('Place Start', 'cursor', () => trackAction('place')),
       shelfBtn('Aim Start', 'rotate', () => trackAction('aim')),
       shelfBtn('Start settings', 'sliders', openKMP),
@@ -10489,6 +10631,7 @@ function buildTrackShelf(sh) {
   return true;
 }
 function trackTool(tool) {
+  cancelViewportGesture();
   if (GZ && tc.dragging) return;
   if (S.workspace === 'kmp' && ['move', 'rotate'].includes(tool) && !S.track.start) {
     trackAction('place');
@@ -10505,6 +10648,7 @@ function trackTool(tool) {
       : null,
   );
   buildTools();
+  buildSubbar();
   gizmoSync();
 }
 function trackAction(action) {
@@ -10522,6 +10666,7 @@ function trackAction(action) {
       : 'Tap ahead of Start to set the driving direction.',
   );
   buildTools();
+  buildSubbar();
   gizmoSync();
 }
 function trackScene() {
@@ -10661,6 +10806,7 @@ function drawTrack() {
       );
     }
   }
+  drawCheckpoints(ctx);
   if (S.track.start) {
     const start = S.track.start,
       p = new THREE.Vector3(...start.position),
@@ -10684,7 +10830,7 @@ function drawTrack() {
       ctx.arc(a.x, a.y, 7, 0, Math.PI * 2);
       ctx.stroke();
     }
-    label(p, 'Start · ' + fmt(start.rotation[1], 1) + '°', '#71f0aa');
+    if(!checkpointActive())label(p, 'Start · ' + fmt(start.rotation[1], 1) + '°', '#71f0aa');
   }
 }
 // Picking must not depend on display shading, backface culling, or assigned KCL flags.
@@ -10723,6 +10869,7 @@ function trackTap(x, y) {
     if (S.tool === 'select') openKCL();
     return;
   }
+  if (checkpointActive()) return;
   if (TRACKVIEW.action === 'select') {
     if (S.tool === 'move' || S.tool === 'rotate') return;
     openKMP();
@@ -11153,6 +11300,7 @@ function buildKMP(body) {
   }
   body.append(
     c,
+    h('div',{class:'card'},h('h3',{},'Checkpoints'),h('p',{class:'muted'},(S.track.checkpoints?.points.length||0)+' checkpoint lines · draw, edit, or set normal/key/lap types.'),trackButton('Draw checkpoints',()=>checkpointActivate(),true),trackButton('Checkpoint settings',openCheckpoints)),
     h(
       'div',
       { class: 'card' },
@@ -11165,13 +11313,15 @@ function buildKMP(body) {
         S.track.template
           ? 'Updating: ' +
               S.track.templateName +
-              '. Only the first KTPT position/rotation changes; other entries and sections are preserved.'
-          : 'Automatic Time Trials test setup: adds temporary linked routes, four checkpoints, cameras and a respawn at Start. No lap drawing needed. These placeholder routes are not fitted to your track; build race routes later. Or open a working KMP from your own track package.',
+              '. Start and edited checkpoint data are updated; other entries and sections are preserved.'
+          : 'Automatic Time Trials test setup supplies temporary enemy/item routes, cameras and a respawn at Start. Your drawn checkpoints replace its placeholder loop. Routes are not fitted to the track; import a working KMP to retain existing routes and respawns.',
       ),
-      S.track.template
+      (S.track.template || S.track.checkpoints?.dirty)
         ? trackButton('Use automatic test setup', () => {
             S.track.template = null;
             S.track.templateName = '';
+            S.track.checkpoints = null;
+            CHECKPOINT.selected = -1;
             trackCommit('Automatic KMP setup');
           })
         : null,
@@ -11179,7 +11329,7 @@ function buildKMP(body) {
       h(
         'p',
         { class: 'muted' },
-        'In-game testing needs course.kcl, course_model.brres and a suitable SZS track package. Use the SZS editor to replace these files in an existing package. Existing routes/checkpoints are preserved, not fitted to your new mesh. Full checkpoint/route editing is not included yet.',
+        'Export includes your checkpoint lines, types, direction and group links. Use the SZS editor to replace course.kmp alongside the course model and collision. Enemy/item routes and respawn positions are not fitted to your new mesh.',
       ),
     ),
   );
@@ -11192,6 +11342,9 @@ $('#fileKMP').addEventListener('change', async (e) => {
     if (file.size > 8 * 1024 * 1024) throw new Error('KMP file is too large');
     const bytes = new Uint8Array(await file.arrayBuffer()),
       parsed = inspectKMP(bytes);
+    const checkpoints=checkpointsFromKMP(parsed,S.track.scale,parsed.start?trackFromWii(parsed.start.position,S.track.scale)[2]:CAM.target.z);
+    checkpointCancel();CHECKPOINT.selected=-1;CHECKPOINT.group=0;
+    S.track.checkpoints=checkpoints;
     S.track.template = b64FromBytes(bytes);
     S.track.templateName = file.name;
     if (parsed.start)
@@ -11218,12 +11371,234 @@ function trackExport(kind) {
       bytes = exportKMP(S.track.start, {
         scale: S.track.scale,
         template: S.track.template ? bytesFromB64(S.track.template) : null,
+        checkpoints: S.track.checkpoints,
       });
     shareOrDownload('course.' + kind, new Blob([bytes], { type: 'application/octet-stream' }));
     if (report) toast(report);
   } catch (e) {
     toast(e.message, true);
   }
+}
+
+// ==== app_checkpoints.js ====
+// KMP checkpoint tools share the track camera and never alter model geometry.
+const CHECKPOINT = {selected:-1, group:0, mode:'draw', type:255, drag:null};
+const checkpointColor = p => p.type===0?'#ed8bff':p.type===255?'#68bcff':'#71f0aa';
+const checkpointName = p => p.type===0?'Lap':p.type===255?'Normal':'Key '+p.type;
+function checkpointActive() { return S.workspace==='kmp' && TRACKVIEW.action==='checkpoints'; }
+function checkpointSelected() { return S.track.checkpoints?.points[CHECKPOINT.selected]; }
+function checkpointData() {
+  if(!S.track.checkpoints) S.track.checkpoints = S.track.template
+    ? checkpointsFromKMP(inspectKMP(bytesFromB64(S.track.template)),S.track.scale,S.track.start?.position[2]||0)
+    : {points:[],groups:[],extra:[0,0],dirty:false};
+  return S.track.checkpoints;
+}
+function checkpointTopView() {
+  CAM.anim=null;CAM.yaw=-Math.PI/2;CAM.pitch=Math.PI/2;CAM.ortho=true;CAM.autoOrtho=false;CAM.viewName='top';
+  const box=new THREE.Box3();for(const o of S.objects)if(o.visible)box.expandByObject(o.node);
+  if(!box.isEmpty())CAM.target.z=box.max.z;
+  applyCamera();updateViewButtons();
+}
+function checkpointActivate(mode='draw') {
+  if(S.workspace!=='kmp')setWorkspace('kmp');
+  const data=checkpointData();
+  if(data.points.length>255){toast('This editor supports up to 255 checkpoints. The imported file is preserved.',true);return;}
+  if(data.points.length) {
+    const used=new Set();let valid=true;
+    for(const g of data.groups){
+      if(!g.count||[...g.prev,...g.next].some(i=>i!==255&&i>=data.groups.length))valid=false;
+      for(let i=g.start;i<g.start+g.count;i++){if(i>=data.points.length||used.has(i))valid=false;used.add(i);}
+    }
+    if(!valid||used.size!==data.points.length){toast('Repair the imported checkpoint groups before editing. The file is preserved.',true);return;}
+  }
+  closeSheet();cancelViewportGesture();S.tool='select';TRACKVIEW.action='checkpoints';CHECKPOINT.mode=mode;
+  if(!data.points.length)CHECKPOINT.type=0;
+  checkpointTopView();buildTools();buildSubbar();gizmoSync();
+}
+function checkpointDone() { cancelViewportGesture();TRACKVIEW.action='select';hint(null);buildTools();buildSubbar();gizmoSync(); }
+function checkpointCancel() { CHECKPOINT.drag=null;requestRender(); }
+function checkpointNextKey() {
+  const used=new Set(checkpointData().points.filter(p=>p.type>0&&p.type<255).map(p=>p.type));
+  for(let i=1;i<=127;i++)if(!used.has(i))return i;
+  return 127;
+}
+function checkpointCommit(label) { checkpointData().dirty=true;trackCommit(label); }
+function checkpointSetType(type) {
+  const p=checkpointSelected();
+  if(CHECKPOINT.mode==='edit' && p) {
+    p.type=type===1 ? (p.type>0&&p.type<255?p.type:checkpointNextKey()) : type;
+    checkpointCommit('Checkpoint type');
+  } else {CHECKPOINT.type=type;buildSubbar();}
+}
+function checkpointControls(bar) {
+  hint(CHECKPOINT.mode==='draw'?'Drag across the road to add a line':'Drag an endpoint or line to move it');
+  const mode=segButtons(CHECKPOINT.mode,[['draw','Draw'],['edit','Edit']],v=>{checkpointCancel();CHECKPOINT.mode=v;buildSubbar();});
+  mode.setAttribute('aria-label','Checkpoint tool mode');
+  const p=CHECKPOINT.mode==='edit'?checkpointSelected():null, t=p?.type??CHECKPOINT.type;
+  const types=segButtons(t===0?'lap':t===255?'normal':'key',[['normal','Normal'],['key','Key'],['lap','Lap']],v=>checkpointSetType({normal:255,key:1,lap:0}[v]));
+  types.setAttribute('aria-label','Checkpoint type');
+  bar.append(mode,trackButton('Done',checkpointDone),types,trackButton('Flip direction',checkpointFlip),trackButton('Checkpoint settings',openCheckpoints));
+}
+function checkpointPlanePoint(p, height) {
+  const ray=screenRay(p.x,p.y);
+  if(Math.abs(ray.ray.direction.z)<1e-6)return null;
+  const t=(height-ray.ray.origin.z)/ray.ray.direction.z;
+  if(!CAM.ortho && t<0)return null;
+  return ray.ray.at(t,new THREE.Vector3());
+}
+function checkpointSurfacePoint(p, height) {
+  const ray=screenRay(p.x,p.y);
+  if(CAM.ortho){ray.ray.origin.addScaledVector(camBasis().z,-camera.near);ray.far=camera.far-camera.near;}
+  return trackHits(ray)[0]?.point || checkpointPlanePoint(p,height);
+}
+function checkpointScreen(p) {
+  return [p.left,p.right].map(v=>toScreen(new THREE.Vector3(v[0],v[1],p.height)));
+}
+function checkpointPick(p) {
+  const data=S.track.checkpoints;if(!data)return null;
+  let best=null,dist=18;
+  data.points.forEach((cp,i)=>{
+    const [a,b]=checkpointScreen(cp);if(a.z<-1||a.z>1||b.z<-1||b.z>1)return;
+    for(const [point,part] of [[a,'left'],[b,'right']]) {
+      const d=Math.hypot(point.x-p.x,point.y-p.y);
+      if(d<dist){dist=d;best={i,part};}
+    }
+  });
+  if(best)return best;
+  data.points.forEach((cp,i)=>{
+    const [a,b]=checkpointScreen(cp);if(a.z<-1||a.z>1||b.z<-1||b.z>1)return;
+    const dx=b.x-a.x,dy=b.y-a.y,t=clamp(((p.x-a.x)*dx+(p.y-a.y)*dy)/(dx*dx+dy*dy||1),0,1);
+    const d=Math.hypot(p.x-a.x-t*dx,p.y-a.y-t*dy);
+    if(d<dist){dist=d;best={i,part:'line'};}
+  });
+  return best;
+}
+function checkpointBegin(p) {
+  const data=checkpointData();
+  if(CHECKPOINT.mode==='edit') {
+    const hit=checkpointPick(p);if(!hit){CHECKPOINT.selected=-1;buildSubbar();requestRender();return;}
+    CHECKPOINT.selected=hit.i;CHECKPOINT.group=data.groups.findIndex(g=>hit.i>=g.start&&hit.i<g.start+g.count);
+    const cp=data.points[hit.i],point=checkpointPlanePoint(p,cp.height);
+    if(point)CHECKPOINT.drag={kind:'edit',...hit,from:point,source:structuredClone(cp),preview:structuredClone(cp),screen:p};
+    buildSubbar();requestRender();return;
+  }
+  if(data.points.length>=255){toast('Maximum 255 checkpoints',true);return;}
+  const point=checkpointSurfacePoint(p,CAM.target.z);if(!point)return;
+  const xy=[point.x,point.y];
+  CHECKPOINT.drag={kind:'draw',screen:p,preview:{left:xy,right:xy.slice(),height:point.z,type:CHECKPOINT.type===1?checkpointNextKey():CHECKPOINT.type,respawn:0,prev:255,next:255}};
+  requestRender();
+}
+function checkpointMove(p) {
+  const d=CHECKPOINT.drag;if(!d)return;
+  const point=checkpointPlanePoint(p,d.preview.height);if(!point)return;
+  if(d.kind==='draw')d.preview.right=[point.x,point.y];
+  else if(d.part==='line')for(const side of ['left','right'])d.preview[side]=[d.source[side][0]+point.x-d.from.x,d.source[side][1]+point.y-d.from.y];
+  else d.preview[d.part]=[point.x,point.y];
+  requestRender();
+}
+function checkpointEnd(p,cancel=false) {
+  const d=CHECKPOINT.drag;if(!d)return;
+  if(!cancel)checkpointMove(p);
+  CHECKPOINT.drag=null;
+  const cp=d.preview, data=checkpointData();
+  if(cancel || Math.hypot(p.x-d.screen.x,p.y-d.screen.y)<4 || Math.hypot(cp.right[0]-cp.left[0],cp.right[1]-cp.left[1])<1e-7){requestRender();return;}
+  if(d.kind==='edit')data.points[d.i]=cp;
+  else {
+    if(!data.groups.length)data.groups.push({start:0,count:0,prev:[0],next:[0],padding:0});
+    const g=data.groups[CHECKPOINT.group]||data.groups[0];
+    CHECKPOINT.selected=g.start+g.count;data.points.splice(CHECKPOINT.selected,0,cp);g.count++;relinkCheckpoints(data);
+    if(CHECKPOINT.type===0)CHECKPOINT.type=255;
+  }
+  checkpointCommit(d.kind==='edit'?'Move checkpoint':'Add checkpoint');
+}
+function checkpointFlip() {
+  const p=checkpointSelected();if(!p){toast('Select or draw a checkpoint first');return;}
+  [p.left,p.right]=[p.right,p.left];checkpointCommit('Flip checkpoint direction');
+}
+function checkpointDelete() {
+  const data=checkpointData(),i=CHECKPOINT.selected,p=data.points[i];if(!p)return;
+  const g=data.groups.find(g=>i>=g.start&&i<g.start+g.count);
+  if(!g)return;
+  if(g.count===1&&data.groups.length>1){toast('Keep one checkpoint in each imported group. Move its endpoints instead.',true);return;}
+  data.points.splice(i,1);g.count--;if(!data.points.length)data.groups=[];
+  relinkCheckpoints(data);CHECKPOINT.selected=Math.min(i,data.points.length-1);checkpointCommit('Delete checkpoint');
+}
+function checkpointReorder(delta) {
+  const data=checkpointData(),i=CHECKPOINT.selected,g=data.groups.find(g=>i>=g.start&&i<g.start+g.count),j=i+delta;
+  if(!g||j<g.start||j>=g.start+g.count)return;
+  [data.points[i],data.points[j]]=[data.points[j],data.points[i]];CHECKPOINT.selected=j;relinkCheckpoints(data);checkpointCommit('Reorder checkpoint');
+}
+function checkpointNumberKeys() {
+  const data=checkpointData(),lap=data.points.findIndex(p=>p.type===0);
+  if(data.groups.length!==1||lap<0||data.points.filter(p=>p.type===0).length!==1){toast('Automatic key numbering needs one route group and one lap checkpoint.',true);return;}
+  if(data.points.filter(p=>p.type>0&&p.type<255).length>127){toast('Use at most 127 key checkpoints.',true);return;}
+  let key=1;
+  for(let j=1;j<data.points.length;j++){const p=data.points[(lap+j)%data.points.length];if(p.type>0&&p.type<255)p.type=key++;}
+  checkpointCommit('Number checkpoint keys');
+}
+function checkpointFocus(all=false) {
+  const box=new THREE.Box3(),points=all?checkpointData().points:[checkpointSelected()].filter(Boolean);
+  for(const p of points)for(const v of [p.left,p.right])box.expandByPoint(new THREE.Vector3(...v,p.height));
+  trackFocusBox(box);checkpointTopView();
+}
+function drawCheckpoints(ctx) {
+  const data=S.track.checkpoints;if(S.workspace!=='kmp'||!data)return;
+  const points=data.points.slice(),d=CHECKPOINT.drag;
+  if(d?.kind==='edit')points[d.i]=d.preview;
+  const screen=points.map(checkpointScreen);
+  ctx.save();ctx.lineWidth=1;ctx.strokeStyle='#b9b6d880';ctx.setLineDash([5,5]);
+  for(const [i,j] of checkpointConnections(data)) {
+    const a=screen[i],b=screen[j];if(!a||!b||[...a,...b].some(p=>p.z<-1||p.z>1))continue;
+    ctx.beginPath();for(let k=0;k<2;k++){ctx.moveTo(a[k].x,a[k].y);ctx.lineTo(b[k].x,b[k].y);}ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  if(d?.kind==='draw'){points.push(d.preview);screen.push(checkpointScreen(d.preview));}
+  points.forEach((p,i)=>{
+    const [a,b]=screen[i];if(a.z<-1||a.z>1||b.z<-1||b.z>1)return;
+    const selected=i===CHECKPOINT.selected||i>=data.points.length,color=checkpointColor(p);
+    ctx.strokeStyle=selected?'#ffffff':color;ctx.lineWidth=selected?4:2.5;
+    ctx.beginPath();ctx.moveTo(a.x,a.y);ctx.lineTo(b.x,b.y);ctx.stroke();
+    ctx.fillStyle=color;for(const s of [a,b]){ctx.beginPath();ctx.arc(s.x,s.y,selected?6:4,0,Math.PI*2);ctx.fill();}
+    const dx=p.right[0]-p.left[0],dy=p.right[1]-p.left[1],len=Math.hypot(dx,dy);if(len<1e-10)return;
+    const center=new THREE.Vector3((p.left[0]+p.right[0])/2,(p.left[1]+p.right[1])/2,p.height);
+    const from=toScreen(center),to=toScreen(center.clone().add(new THREE.Vector3(-dy/len,dx/len,0)));
+    const angle=Math.atan2(to.y-from.y,to.x-from.x),end={x:from.x+26*Math.cos(angle),y:from.y+26*Math.sin(angle)};
+    ctx.strokeStyle=color;ctx.lineWidth=2.5;ctx.beginPath();ctx.moveTo(from.x,from.y);ctx.lineTo(end.x,end.y);
+    ctx.moveTo(end.x-9*Math.cos(angle-.5),end.y-9*Math.sin(angle-.5));ctx.lineTo(end.x,end.y);ctx.lineTo(end.x-9*Math.cos(angle+.5),end.y-9*Math.sin(angle+.5));ctx.stroke();
+    const label=(i+1)+' · '+checkpointName(p);ctx.font='600 12px system-ui';
+    const width=ctx.measureText(label).width+10;ctx.fillStyle='#101020e8';ctx.fillRect(from.x-width/2,from.y+9,width,21);
+    ctx.fillStyle=color;ctx.fillText(label,from.x-width/2+5,from.y+24);
+    if(selected){ctx.font='600 10px system-ui';ctx.fillText('L',a.x+8,a.y-8);ctx.fillText('R',b.x+8,b.y-8);}
+  });
+  ctx.restore();
+}
+function openCheckpoints() { checkpointData();openSheet('KMP · Checkpoints',buildCheckpoints,{panel:true,kind:'checkpoints'}); }
+function buildCheckpoints(body) {
+  const data=checkpointData(),p=checkpointSelected();
+  body.append(h('div',{class:'card'},h('h3',{},'Checkpoints · '+data.points.length),
+    h('p',{class:'muted'},'Drag left to right across the road. The arrow faces the racing direction. Draw lines in driving order; dotted links show the route. The first line defaults to Lap.'),
+    h('div',{class:'row'},trackButton('Draw checkpoints',()=>checkpointActivate('draw'),true),trackButton('Edit checkpoints',()=>checkpointActivate('edit'))),
+    h('div',{class:'row'},trackButton('Top view',checkpointTopView),trackButton('Frame checkpoints',()=>checkpointFocus(true))),trackButton('Number keys in order',checkpointNumberKeys)));
+  if(data.groups.length>1)body.append(field('Checkpoint group',selectInput(CHECKPOINT.group,data.groups.map((g,i)=>[i,'Group '+(i+1)+' · '+g.count+' checkpoints']),v=>{CHECKPOINT.group=+v;},'Checkpoint group')));
+  if(p) {
+    const dx=p.right[0]-p.left[0],dy=p.right[1]-p.left[1],heading=((Math.atan2(-dy,-dx)/DEG)%360+360)%360;
+    const card=h('div',{class:'card'},h('h3',{},'Checkpoint '+(CHECKPOINT.selected+1)),
+      field('Type',selectInput(p.type===0?'lap':p.type===255?'normal':'key',[['normal','Normal'],['key','Key'],['lap','Lap']],v=>{CHECKPOINT.mode='edit';checkpointSetType({normal:255,key:1,lap:0}[v]);},'Selected checkpoint type')),
+      h('p',{class:'muted'},'Facing '+fmt(heading,1)+'° Wii yaw · '+fmt(Math.hypot(dx,dy),2)+' m wide'));
+    if(p.type>0&&p.type<255)card.append(field('Key ID',numInput(p.type,v=>{p.type=v;checkpointCommit('Checkpoint key ID');},{int:true,min:1,max:254,label:'Checkpoint key ID'})));
+    const respawns=S.track.template?inspectKMP(bytesFromB64(S.track.template)).sections.find(s=>s.name==='JGPT')?.count||0:1;
+    card.append(field('Respawn index',numInput(p.respawn,v=>{p.respawn=v;checkpointCommit('Checkpoint respawn');},{int:true,min:0,max:Math.max(0,Math.min(255,respawns-1)),label:'Checkpoint respawn index'})));
+    for(const [side,name] of [['left','Left'],['right','Right']])for(const [axis,label] of [[0,'X'],[1,'Y']])card.append(field(name+' '+label,numInput(p[side][axis],v=>{p[side][axis]=v;checkpointCommit('Checkpoint endpoint');},{label:'Checkpoint '+name+' '+label})));
+    card.append(h('div',{class:'row'},trackButton('Flip direction',checkpointFlip),trackButton('Focus selected',()=>checkpointFocus())),h('div',{class:'row'},trackButton('Earlier',()=>checkpointReorder(-1)),trackButton('Later',()=>checkpointReorder(1)),trackButton('Delete checkpoint',checkpointDelete)));
+    body.append(card);
+  }
+  const list=h('div',{class:'card'},h('h3',{},'Driving order'));
+  data.points.forEach((p,i)=>list.append(trackButton((i+1)+' · '+checkpointName(p),()=>{CHECKPOINT.selected=i;CHECKPOINT.group=data.groups.findIndex(g=>i>=g.start&&i<g.start+g.count);CHECKPOINT.mode='edit';refreshSheet(true);requestRender();},i===CHECKPOINT.selected)));
+  if(!data.points.length)list.append(h('p',{class:'muted'},'Draw a line across the track to begin.'));
+  body.append(list);
+  const warnings=checkpointWarnings(data);
+  if(warnings.length)body.append(h('div',{class:'card'},h('h3',{},'Route checks'),...warnings.map(s=>h('p',{class:'muted'},s))));
+  body.append(h('p',{class:'muted'},'Normal checkpoints track progress. Pass key IDs in order before crossing Lap again. Gates have no game height; they extend vertically. Imported group links and other KMP sections are preserved.'));
 }
 
 // ==== app_szs.js ====
@@ -11339,6 +11714,7 @@ function szsProjectFile(name) {
     return exportKMP(S.track.start, {
       scale: S.track.scale,
       template: S.track.template ? bytesFromB64(S.track.template) : null,
+      checkpoints: S.track.checkpoints,
     });
   return runExport('brres', {
     baseName: 'course_model',
@@ -12025,10 +12401,10 @@ function buildTools() {
   circleCursor();
   const selectionTools = [...TOOLS3D.slice(0,2), ['circle','circleSelect','Circle select · C'], ...TOOLS3D.slice(2,4)];
   const modelTools = S.mode === 'edit' ? [...selectionTools, ['knife', 'knife', 'Knife tool · K'], ['inset', 'inset', 'Inset faces · I'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : [...selectionTools,...TOOLS3D.slice(4)];
-  for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
+  for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['checkpoints','checkpoint','Checkpoints'],['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'circle') { circleActivate(); return; } if (S.tool === 'circle') circleDone(); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'circle') { circleActivate(); return; } if (S.tool === 'circle') circleDone(); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && t[0]==='checkpoints') { checkpointActivate();return; } if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   if (S.workspace === 'model') col.append(h('hr'), h('button', {
@@ -12385,6 +12761,7 @@ function newScene() {
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
   S.objects = []; S.materials = []; S.mode = 'object'; S.active = null; S.uvSel = new Set();
+  checkpointCancel();CHECKPOINT.selected=-1;CHECKPOINT.group=0;
   S.track = normalizeTrack();
   S.cursor.set(0, 0, 0); S.ruler = normalizeRuler(); rulerResetPending();
   const mat = newMaterial('Material', '#c9ccd2');
@@ -12921,6 +13298,8 @@ c3d.addEventListener('pointerdown', (e) => {
     else if (circleActive() && e.altKey) G.mode=e.shiftKey ? 'pan' : 'orbit';
     else if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
     else if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
+    else if (checkpointActive() && !e.altKey && e.button===0) { G.mode='checkpoint';checkpointBegin(p); }
+    else if (checkpointActive() && e.altKey) G.mode=e.shiftKey?'pan':'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
     if (G.mode === 'pending') {
@@ -12928,7 +13307,7 @@ c3d.addEventListener('pointerdown', (e) => {
       beginHold(e, p);
     }
   } else if (G.p.size === 2) {
-    circleEnd(true); circleCursor(null);
+    checkpointCancel();circleEnd(true); circleCursor(null);
     if (TF.active?.quickExtrude) tfCancel();
     G.extrudeCandidate = false;
     if (G.mode === 'box') { $('#boxrect').hidden = true; }
@@ -12975,6 +13354,7 @@ c3d.addEventListener('pointermove', (e) => {
     G.two = t; CAM.viewName = CAM.ortho && CAM.autoOrtho && !G.twisting ? CAM.viewName : null;
     return;
   }
+  if (G.mode === 'checkpoint') { checkpointMove(p);return; }
   if (G.mode === 'circle') { circlePaint(p); return; }
   if (G.mode === 'pending' && G.moved) {
     if (TF.active) G.mode = 'tf';
@@ -13006,6 +13386,7 @@ function endPointer(e) {
   const pt = G.p.get(e.pointerId);
   G.p.delete(e.pointerId);
   if (G.p.size > 0) { if (G.mode === 'two' && G.p.size === 1) G.mode = 'none'; return; }
+  if(G.mode==='checkpoint')checkpointEnd(rel(e),e.type!=='pointerup');
   const quick = performance.now() - G.t0 < 320;
   if (G.mode === 'circle') {
     if (e.type === 'pointerup') circlePaint(rel(e));
@@ -13029,7 +13410,7 @@ function endPointer(e) {
 c3d.addEventListener('pointerup', endPointer);
 c3d.addEventListener('pointercancel', endPointer);
 c3d.addEventListener('lostpointercapture', endPointer);
-function cancelViewportGesture() { circleEnd(true); circleCursor(null); cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
+function cancelViewportGesture() { checkpointCancel();circleEnd(true); circleCursor(null); cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
 window.addEventListener('blur', cancelViewportGesture);
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
 c3d.addEventListener('pointerleave', () => { if (!CIRCLE.stroke) circleCursor(null); });
@@ -13251,6 +13632,10 @@ document.addEventListener('keydown', (e) => {
     if (e.code === 'NumpadDecimal') { frameSelected(); return; }
   }
   if (S.workspace !== 'model') {
+    if(checkpointActive()) {
+      if(k==='Delete'||k==='Backspace'){e.preventDefault();checkpointDelete();return;}
+      if(k==='Home'){checkpointFocus(true);return;}
+    }
     if (k === 'Home') { S.workspace === 'kmp' && S.track.start ? trackFocusStart() : frameSelected(); return; }
     if (k === 'Escape') { trackTool('select'); return; }
     if (!ctrl && !e.altKey) { const tool = {g:'move',r:'rotate',s:'scale'}[k.toLowerCase()]; if (tool && !(S.workspace === 'kmp' && tool === 'scale')) trackTool(tool); }
@@ -13351,7 +13736,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { CIRCLE, circleActivate, circleDone, pickElement, toggleInSel, KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { CHECKPOINT, checkpointActivate, checkpointTopView, checkpointScreen, checkpointConnections, checkpointWarnings, openCheckpoints, CIRCLE, circleActivate, circleDone, pickElement, toggleInSel, KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();

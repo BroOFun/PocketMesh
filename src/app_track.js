@@ -32,11 +32,12 @@ function openTrackEditor() {
   menuSheet('Track Editor', [
     {label: 'Course Model', icon: 'cube', desc: 'Model geometry, BRRES resources and textures', run: () => { setWorkspace('model'); openBRRESEditor(); }},
     {label: 'KCL', icon: 'layers', desc: 'Collision materials and road types', run: () => setWorkspace('kcl')},
-    {label: 'KMP', icon: 'cursor', desc: 'Start position and driving direction', run: () => setWorkspace('kmp')},
+    {label: 'KMP', icon: 'cursor', desc: 'Start position, direction and checkpoints', run: () => setWorkspace('kmp')},
     {label: 'SZS', icon: 'folder', desc: 'Track archive and file replacement', run: openSZSEditor},
   ]);
 }
 function setWorkspace(workspace) {
+  checkpointCancel();
   if (S.tool === 'circle') circleDone();
   if (!['model', 'kcl', 'kmp'].includes(workspace)) return;
   if (S.tool === 'knife') knifeCancel();
@@ -67,6 +68,7 @@ function setWorkspace(workspace) {
   );
 }
 function trackSubbar(bar) {
+  if(checkpointActive()) {checkpointControls(bar);return true;}
   const menu = trackButton('Track Editor ▾', openTrackEditor);
   menu.setAttribute('aria-label', 'Track Editor');
   bar.append(menu, h('span', {class: 'muted', style: {whiteSpace: 'nowrap'}}, S.workspace === 'model' ? 'Course Model' : S.workspace.toUpperCase()));
@@ -75,6 +77,9 @@ function trackSubbar(bar) {
     trackButton(S.workspace === 'kcl' ? 'Materials & flags' : 'Start point', S.workspace === 'kcl' ? openKCL : openKMP),
     trackButton('Export ' + S.workspace.toUpperCase(), () => trackExport(S.workspace)),
   );
+  if(S.workspace==='kmp') {
+    bar.append(trackButton('Checkpoints',()=>checkpointActivate()));
+  }
   return true;
 }
 function buildTrackShelf(sh) {
@@ -87,6 +92,7 @@ function buildTrackShelf(sh) {
     );
   else
     sh.append(
+      shelfBtn('Checkpoints', 'checkpoint', () => checkpointActivate()),
       shelfBtn('Place Start', 'cursor', () => trackAction('place')),
       shelfBtn('Aim Start', 'rotate', () => trackAction('aim')),
       shelfBtn('Start settings', 'sliders', openKMP),
@@ -105,6 +111,7 @@ function buildTrackShelf(sh) {
   return true;
 }
 function trackTool(tool) {
+  cancelViewportGesture();
   if (GZ && tc.dragging) return;
   if (S.workspace === 'kmp' && ['move', 'rotate'].includes(tool) && !S.track.start) {
     trackAction('place');
@@ -121,6 +128,7 @@ function trackTool(tool) {
       : null,
   );
   buildTools();
+  buildSubbar();
   gizmoSync();
 }
 function trackAction(action) {
@@ -138,6 +146,7 @@ function trackAction(action) {
       : 'Tap ahead of Start to set the driving direction.',
   );
   buildTools();
+  buildSubbar();
   gizmoSync();
 }
 function trackScene() {
@@ -277,6 +286,7 @@ function drawTrack() {
       );
     }
   }
+  drawCheckpoints(ctx);
   if (S.track.start) {
     const start = S.track.start,
       p = new THREE.Vector3(...start.position),
@@ -300,7 +310,7 @@ function drawTrack() {
       ctx.arc(a.x, a.y, 7, 0, Math.PI * 2);
       ctx.stroke();
     }
-    label(p, 'Start · ' + fmt(start.rotation[1], 1) + '°', '#71f0aa');
+    if(!checkpointActive())label(p, 'Start · ' + fmt(start.rotation[1], 1) + '°', '#71f0aa');
   }
 }
 // Picking must not depend on display shading, backface culling, or assigned KCL flags.
@@ -339,6 +349,7 @@ function trackTap(x, y) {
     if (S.tool === 'select') openKCL();
     return;
   }
+  if (checkpointActive()) return;
   if (TRACKVIEW.action === 'select') {
     if (S.tool === 'move' || S.tool === 'rotate') return;
     openKMP();
@@ -769,6 +780,7 @@ function buildKMP(body) {
   }
   body.append(
     c,
+    h('div',{class:'card'},h('h3',{},'Checkpoints'),h('p',{class:'muted'},(S.track.checkpoints?.points.length||0)+' checkpoint lines · draw, edit, or set normal/key/lap types.'),trackButton('Draw checkpoints',()=>checkpointActivate(),true),trackButton('Checkpoint settings',openCheckpoints)),
     h(
       'div',
       { class: 'card' },
@@ -781,13 +793,15 @@ function buildKMP(body) {
         S.track.template
           ? 'Updating: ' +
               S.track.templateName +
-              '. Only the first KTPT position/rotation changes; other entries and sections are preserved.'
-          : 'Automatic Time Trials test setup: adds temporary linked routes, four checkpoints, cameras and a respawn at Start. No lap drawing needed. These placeholder routes are not fitted to your track; build race routes later. Or open a working KMP from your own track package.',
+              '. Start and edited checkpoint data are updated; other entries and sections are preserved.'
+          : 'Automatic Time Trials test setup supplies temporary enemy/item routes, cameras and a respawn at Start. Your drawn checkpoints replace its placeholder loop. Routes are not fitted to the track; import a working KMP to retain existing routes and respawns.',
       ),
-      S.track.template
+      (S.track.template || S.track.checkpoints?.dirty)
         ? trackButton('Use automatic test setup', () => {
             S.track.template = null;
             S.track.templateName = '';
+            S.track.checkpoints = null;
+            CHECKPOINT.selected = -1;
             trackCommit('Automatic KMP setup');
           })
         : null,
@@ -795,7 +809,7 @@ function buildKMP(body) {
       h(
         'p',
         { class: 'muted' },
-        'In-game testing needs course.kcl, course_model.brres and a suitable SZS track package. Use the SZS editor to replace these files in an existing package. Existing routes/checkpoints are preserved, not fitted to your new mesh. Full checkpoint/route editing is not included yet.',
+        'Export includes your checkpoint lines, types, direction and group links. Use the SZS editor to replace course.kmp alongside the course model and collision. Enemy/item routes and respawn positions are not fitted to your new mesh.',
       ),
     ),
   );
@@ -808,6 +822,9 @@ $('#fileKMP').addEventListener('change', async (e) => {
     if (file.size > 8 * 1024 * 1024) throw new Error('KMP file is too large');
     const bytes = new Uint8Array(await file.arrayBuffer()),
       parsed = inspectKMP(bytes);
+    const checkpoints=checkpointsFromKMP(parsed,S.track.scale,parsed.start?trackFromWii(parsed.start.position,S.track.scale)[2]:CAM.target.z);
+    checkpointCancel();CHECKPOINT.selected=-1;CHECKPOINT.group=0;
+    S.track.checkpoints=checkpoints;
     S.track.template = b64FromBytes(bytes);
     S.track.templateName = file.name;
     if (parsed.start)
@@ -834,6 +851,7 @@ function trackExport(kind) {
       bytes = exportKMP(S.track.start, {
         scale: S.track.scale,
         template: S.track.template ? bytesFromB64(S.track.template) : null,
+        checkpoints: S.track.checkpoints,
       });
     shareOrDownload('course.' + kind, new Blob([bytes], { type: 'application/octet-stream' }));
     if (report) toast(report);
