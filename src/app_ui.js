@@ -1220,8 +1220,13 @@ c3d.addEventListener('pointermove', (e) => {
       CAM.pitch = clamp(CAM.pitch + (t.my - G.two.my) * 0.008, -Math.PI / 2, Math.PI / 2);
       if (CAM.autoOrtho) { CAM.ortho = false; CAM.autoOrtho = false; updateViewButtons(); }
       applyCamera();
-    } else pan(t.mx - G.two.mx, t.my - G.two.my);
-    if (G.two.d > 10 && t.d > 10) zoom(G.two.d / t.d);
+      if (G.two.d > 10 && t.d > 10) zoom(G.two.d / t.d, {x:t.mx,y:t.my});
+    } else {
+      // Focus before panning so finger motion uses the surface's new depth.
+      // Pointer events arrive one finger at a time even for a symmetric pinch.
+      if (G.two.d > 10 && t.d > 10) zoom(G.two.d / t.d, {x:G.two.mx,y:G.two.my});
+      pan(t.mx - G.two.mx, t.my - G.two.my);
+    }
     if (G.twisting && dth) twistView(dth);
     G.two = t; CAM.viewName = CAM.ortho && CAM.autoOrtho && !G.twisting ? CAM.viewName : null;
     return;
@@ -1284,7 +1289,7 @@ function cancelViewportGesture() { circleEnd(true); circleCursor(null); cancelHo
 window.addEventListener('blur', cancelViewportGesture);
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
 c3d.addEventListener('pointerleave', () => { if (!CIRCLE.stroke) circleCursor(null); });
-c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (circleActive()) { circleRadius(CIRCLE.radius + (e.deltaY < 0 ? 4 : -4)); return; } if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
+c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (circleActive()) { circleRadius(CIRCLE.radius + (e.deltaY < 0 ? 4 : -4)); return; } zoom(Math.exp(e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), rel(e)); }, { passive: false });
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('gesturechange', (e) => e.preventDefault());
 

@@ -41,6 +41,7 @@ See [Basic track authoring](TRACK-AUTHORING.md) for the BRRES/KCL/KMP workflow, 
 - **Hold a vertex, edge, face or object**: enter multiselect; tap to toggle more; Done to finish.
 - **One finger drag**: orbit. **Tap**: select. With **Circle Select**, drag paints a selection instead.
 - **Two fingers**: drag to pan, pinch to zoom, twist to turn the view. **Two-finger tap**: undo. **Three-finger tap**: redo.
+- **Close-up zoom**: mouse-wheel zoom follows the surface under the pointer; pinch zoom follows the midpoint between your fingers. You can approach the road closely in Model, KCL, and KMP, including elevated surfaces, without changing the model or export scale.
 - **Map style** (Settings): one finger pans; two fingers pinch, twist and slide up/down to tilt, like a maps app.
 - During Move / Rotate / Scale, drag anywhere on the viewport; two fingers still navigate.
 - A hardware keyboard works too: Tab, G R S, X Y Z, E, I, Ctrl+R, A, F, M, U, Shift+A, Shift+D, Ctrl+Z, numpad views.
