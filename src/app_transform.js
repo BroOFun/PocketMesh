@@ -246,6 +246,7 @@ function updateGuide(t) {
   requestRender();
 }
 function tfStart(kind, opts = {}) {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfCancel();
   const st = tfBuildState(kind);
@@ -495,6 +496,7 @@ function tfHideBar() {
 // ---- parameter modal: one value driven by horizontal drag (inset, loop cut slide, etc.) ----
 const PM = { active: null };
 function paramModal({ label, value = 0, min = -Infinity, max = Infinity, perPixel = 0.01, apply, onConfirm, onCancel, extra, undoLabel, hintText }) {
+  if (S.tool === 'circle') circleDone();
   if (TF.active) tfCancel();
   PM.active = { label, value, min, max, perPixel, apply, onConfirm, onCancel, extra, undoLabel, num: '' };
   pmShowBar();

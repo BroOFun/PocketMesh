@@ -43,6 +43,7 @@ const ICONS = {
   face: '<rect x="5" y="5" width="14" height="14" rx="1.5" fill="currentColor" fill-opacity=".85"/>',
   select: '<path d="M6 3.5 18.5 12l-5.4 1.3L10.2 19z" fill="currentColor" fill-opacity=".18"/>',
   box: '<rect x="3.5" y="4.5" width="15" height="12" rx="1" stroke-dasharray="3 2.4"/><path d="M14 13l7 2.8-3 .9-1 3z" fill="currentColor"/>',
+  circleSelect: '<circle cx="11" cy="11" r="8" stroke-dasharray="2 2"/><path d="M14 13l7 2.8-3 .9-1 3z" fill="currentColor"/>',
   cursor: '<circle cx="12" cy="12" r="6" stroke-dasharray="3.1 3.1"/><path d="M12 2.5v5M12 16.5v5M2.5 12h5M16.5 12h5"/>',
   move: '<path d="M12 3v18M3 12h18M12 3 9.5 5.5M12 3l2.5 2.5M12 21l-2.5-2.5M12 21l2.5-2.5M3 12l2.5-2.5M3 12l2.5 2.5M21 12l-2.5-2.5M21 12l-2.5 2.5"/>',
   rotate: '<path d="M19.5 12a7.5 7.5 0 1 1-2.2-5.3"/><path d="M19.8 3.8v4.6h-4.6"/>',
@@ -504,12 +505,13 @@ function refreshOverlays(o) {
   if (o.fselOv) o.fselOv.visible = false;
   // edges
   const showEdges = editing || wire || o.selected;
-  if (showEdges && T.edges.length) {
-    const pos = new Float32Array(T.edges.length * 6), col = new Float32Array(T.edges.length * 6);
+  const shownEdges = showEdges ? T.edges : T.edges.filter((_, i) => !T.edgeFaces[i].length);
+  if (shownEdges.length) {
+    const pos = new Float32Array(shownEdges.length * 6), col = new Float32Array(shownEdges.length * 6);
     const s = o.esel;
-    let base = wire && !o.selected ? COL.wire : o === S.active ? COL.objAct : COL.objSel;
+    let base = !o.selected ? COL.wire : o === S.active ? COL.objAct : COL.objSel;
     if (editing) base = seeThrough ? COL.wire : COL.dark;
-    T.edges.forEach(([a, b], i) => {
+    shownEdges.forEach(([a, b], i) => {
       const pa = P[a], pb = P[b];
       pos.set(pa, i * 6); pos.set(pb, i * 6 + 3);
       let c = base;
@@ -532,14 +534,14 @@ function refreshOverlays(o) {
     const mat = editing ? (seeThrough ? LM.editX : LM.edit) : wire ? (S.xray ? LM.wireX : LM.wire) : LM.outline;
     setLineGeo(o, 'edgeOv', pos, col, mat);
   } else if (o.edgeOv) o.edgeOv.visible = false;
-  // vertices
-  const T2 = T;
-  if (editing && (S.selectMode === 'vert' || T2.edges.length === 0)) {
-    const pos = new Float32Array(P.length * 3), col = new Float32Array(P.length * 3);
-    for (let i = 0; i < P.length; i++) {
-      pos.set(P[i], i * 3);
-      col.set(o.esel.verts.has(i) ? COL.sel : seeThrough ? COL.wire : COL.dark, i * 3);
-    }
+  // Isolated points remain visible even when the object has no faces/edges.
+  const pointIds = P.map((_,i)=>i).filter(i => editing ? S.selectMode === 'vert' || !T.edges.length : !T.vertEdges[i].length);
+  if (pointIds.length) {
+    const pos = new Float32Array(pointIds.length * 3), col = new Float32Array(pointIds.length * 3);
+    pointIds.forEach((v,i) => {
+      pos.set(P[v], i * 3);
+      col.set(editing ? (o.esel.verts.has(v) ? COL.sel : seeThrough ? COL.wire : COL.dark) : o.selected ? COL.objAct : COL.wire, i * 3);
+    });
     setPointsGeo(o, 'vertOv', pos, col, 7, seeThrough);
   } else if (o.vertOv) o.vertOv.visible = false;
   // face dots
@@ -673,7 +675,7 @@ function frameSelected() {
     for (const v of S.active.esel.verts) box.expandByPoint(_v1.fromArray(S.active.mesh.verts[v]).applyMatrix4(mw));
   } else {
     const objs = S.objects.filter((o) => o.selected && o.visible);
-    for (const o of objs.length ? objs : S.objects.filter((o) => o.visible)) { o.node.updateMatrixWorld(); o.meshNode.geometry.computeBoundingBox(); const b = o.meshNode.geometry.boundingBox.clone().applyMatrix4(o.node.matrixWorld); box.union(b); if (!o.mesh.verts.length) box.expandByPoint(o.node.position); }
+    for (const o of objs.length ? objs : S.objects.filter((o) => o.visible)) { o.node.updateMatrixWorld(); o.meshNode.geometry.computeBoundingBox(); const b = o.meshNode.geometry.boundingBox.clone().applyMatrix4(o.node.matrixWorld); box.union(b); if (b.isEmpty()) for (const v of o.mesh.verts) box.expandByPoint(new THREE.Vector3(...v).applyMatrix4(o.node.matrixWorld)); if (!o.mesh.verts.length) box.expandByPoint(o.node.position); }
   }
   if (box.isEmpty()) box.expandByPoint(S.cursor).expandByScalar(2);
   frameBox(box);
@@ -708,23 +710,19 @@ function projectMeshVerts(o) {
   }
   return out;
 }
-// is a local-space point on object o visible (not hidden behind the object's own surface)?
+// Is a local-space point visible through the scene's surfaces?
 function pointVisible(o, local) {
   if (S.xray || S.shading === 'wire') return true;
-  const wp = _v1.fromArray(local).applyMatrix4(o.node.matrixWorld).clone();
-  const camPos = camera.position.clone();
-  let dir, origin, dist;
-  if (camera.isOrthographicCamera) {
-    dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
-    origin = wp.clone().addScaledVector(dir, -1000);
-    dist = 1000;
-  } else {
-    dir = wp.clone().sub(camPos); dist = dir.length(); dir.normalize(); origin = camPos;
-  }
-  const rc = new THREE.Raycaster(origin, dir, 0, dist * 1.01);
-  const hits = rc.intersectObject(o.meshNode, false);
-  if (!hits.length) return true;
-  return hits[0].distance >= dist - Math.max(1e-4, dist * 0.004);
+  const wp = new THREE.Vector3(...local).applyMatrix4(o.node.matrixWorld);
+  const screen = toScreen(wp);
+  if (screen.z<=-1 || screen.z>=1) return false;
+  const rc = screenRay(screen.x, screen.y), dist = rc.ray.origin.distanceTo(wp);
+  // Use the actual camera distance. A fixed 1000-unit orthographic ray made
+  // the old tolerance larger than small meshes, selecting their back vertices.
+  const tolerance = Math.max(1e-5, dist * 1e-6);
+  rc.far = dist + tolerance;
+  const hits = rc.intersectObjects(S.objects.filter(o => o.visible).map(o => o.meshNode), false);
+  return !hits.length || hits[0].distance >= dist - tolerance;
 }
 function distToSeg(px, py, ax, ay, bx, by) {
   const dx = bx - ax, dy = by - ay, l2 = dx * dx + dy * dy;
@@ -787,6 +785,7 @@ function pickObject(x, y) {
       const r = distToSeg(x, y, SP[a * 4], SP[a * 4 + 1], SP[b * 4], SP[b * 4 + 1]);
       if (r.d < 22 && (!best || r.d < best.d)) best = { d: r.d, o };
     }
+    for (let v=0;v<o.mesh.verts.length;v++) if (!T.vertEdges[v].length && SP[v*4+3]) { const d=Math.hypot(SP[v*4]-x,SP[v*4+1]-y); if (d<22 && (!best || d<best.d) && pointVisible(o,o.mesh.verts[v])) best={d,o}; }
     if (!o.mesh.verts.length) { const s = toScreen(o.node.position); const d = Math.hypot(s.x - x, s.y - y); if (d < 22 && (!best || d < best.d)) best = { d, o }; }
   }
   return best ? best.o : null;
@@ -901,7 +900,7 @@ function snapshot() {
   };
 }
 function restore(snap) {
-  knifeReset();
+  knifeReset(); circleReset();
   const keep = new Map(S.objects.map((o) => [o.id, o]));
   const next = [];
   for (const so of snap.objects) {

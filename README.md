@@ -19,7 +19,7 @@ There's no App Store, Mac or developer account involved. When a new version is p
 | Area | Features |
 | --- | --- |
 | Shapes | Plane, Cube, Circle, UV Sphere, Ico Sphere, Cylinder, Cone, Torus, Grid. Each can be adjusted after adding (size, segments, rings, cap fill). |
-| Selection | Object, vertex, edge and face modes. Multiselect button or long-press. Tap, box select, edge loop (double-tap), edge ring, linked, more/less, boundary loop, all/none/invert. Long-press to enter multiselect; tap to toggle, Done to finish. Set, Add or Subtract modes. X-ray to select through. |
+| Selection | Object, vertex, edge and face modes. Multiselect button or long-press. Tap, box select, adjustable circle selection (drag to paint), edge loop (double-tap a surface edge in Edge mode), edge ring, linked, more/less, boundary loop, all/none/invert. Long-press to enter multiselect; tap to toggle, Done to finish. Set, Add or Subtract modes. X-ray to select through. |
 | Transform | Move, Rotate, Scale and Shrink/Fatten. Drag anywhere, lock to X / Y / Z or a plane, tap twice for local axes, or type an exact value. Snap increments, proportional editing with six falloffs. Pivot: median, bounding box, individual origins, 3D cursor, active. Orientation: global, local, normal, view. Gizmo tools for direct handles. |
 | Modeling | Extrude (region, individual, along normals), Inset (region / individual, depth), Loop Cut and Slide (multiple cuts), Subdivide, Fill, Grid Fill, Triangle Fill, Bridge Edge Loops, Merge (center, cursor, collapse, by distance), Delete and Dissolve, Duplicate, Separate, Join, Triangulate, Tris to Quads, Recalculate / Flip normals, Smooth / Flat shading, Mirror. |
 | Face orientation | Subtle red backface overlay on by default; keeps front faces and textures unchanged. Toggle in Viewport Shading or Settings; the preference stays saved on this device. |
@@ -39,7 +39,7 @@ See [Basic track authoring](TRACK-AUTHORING.md) for the BRRES/KCL/KMP workflow, 
 ## Gestures
 
 - **Hold a vertex, edge, face or object**: enter multiselect; tap to toggle more; Done to finish.
-- **One finger drag**: orbit. **Tap**: select.
+- **One finger drag**: orbit. **Tap**: select. With **Circle Select**, drag paints a selection instead.
 - **Two fingers**: drag to pan, pinch to zoom, twist to turn the view. **Two-finger tap**: undo. **Three-finger tap**: redo.
 - **Map style** (Settings): one finger pans; two fingers pinch, twist and slide up/down to tilt, like a maps app.
 - During Move / Rotate / Scale, drag anywhere on the viewport; two fingers still navigate.
@@ -51,6 +51,7 @@ See [Basic track authoring](TRACK-AUTHORING.md) for the BRRES/KCL/KMP workflow, 
 docs/            the built app (served by GitHub Pages)
 src/             source modules, concatenated by build.mjs into docs/index.html
   DATA-FORMAT.md mesh and scene data format shared by the modules
+  app_select.js  circle brush, add/remove strokes and selection history
   triangulate.js shared boundary-preserving, angle-improving triangulation
   mesh.js        mesh data structure, primitives, modeling operators
   uv.js          unwrapping, projections, packing, straightening
@@ -100,6 +101,20 @@ UV. The 3D cursor uses a small, thin red-and-white ring with short crosshairs.
 **Straighten X** makes selected UVs exactly horizontal; **Straighten Y** makes
 them exactly vertical. Both keep spacing along that UV axis and leave unselected
 UVs unchanged. Plain **Straighten** follows the direction between the endpoints.
+
+Choose the dotted **Circle Select** icon in the left sidebar (keyboard: **C**,
+also **Select → Circle Select**). Drag to paint vertices, edges, face centers or
+whole objects. **Add** accumulates selection; **Remove** erases it. Set **Radius**
+or use the **−/+** buttons; mouse wheel and keyboard **+/−** or **[/]** also resize
+the brush. Middle mouse or Shift-drag temporarily removes. **Done**, Enter,
+Escape or right-click finishes. Two fingers still navigate; Alt-drag or the
+navigation buttons work with a mouse. Each stroke supports undo/redo. X-ray
+controls whether the brush selects through surfaces.
+
+Vertex taps and loose-edge taps stay individual even when repeated quickly.
+Only double-tapping the same surface edge in Edge mode automatically selects a
+loop; use **Select → Edge Loop…** for an entire wire chain. Loose wires and
+isolated vertices remain visible and pickable in Object mode.
 
 Select faces in **Edit Mode** and tap **Triangulate** on the bottom shelf
 (also **Mesh → Triangulate Faces**, keyboard: **Ctrl+T**). Quads and convex or

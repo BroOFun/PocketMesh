@@ -129,6 +129,7 @@ for (const b of document.querySelectorAll('#selModes button')) {
 const VIEW_CYCLE = ['3d', 'split', 'uv'];
 function isUVFocused() { return S.workspace === 'model' && (S.view === 'uv' || (S.view === 'split' && S.focus === 'uv')); }
 function finishEditorInteraction() {
+  if (S.tool === 'circle') circleDone();
   if (S.tool === 'knife') knifeCancel();
   if (TF.active) tfConfirm();
   if (PM.active) pmConfirm();
@@ -191,6 +192,20 @@ function buildSubbar() {
       chip('', 'Deselect', () => uvSelectAll('none')),
       chip('', 'Snap', () => { S.snap = !S.snap; settingsSet('snap', S.snap); buildSubbar(); }, {on: S.snap, icon: 'magnet', aria: 'Snap UV transforms'}),
       chip('', 'Fit view', uvFit));
+    return;
+  }
+  if (S.tool === 'circle') {
+    const size = h('input', {id: 'circleRadius', class: 'num', type: 'number', min: 8, max: 160, step: 2, value: CIRCLE.radius, 'aria-label': 'Circle radius in pixels'});
+    size.addEventListener('input', () => { const v=Number(size.value); if (v>=8 && v<=160) circleRadius(v); });
+    size.addEventListener('change', () => circleRadius(Number(size.value) || 40));
+    const mode = op => { circleEnd(false); CIRCLE.op=op; buildSubbar(); circleCursor(); };
+    bar.append(chip('', 'Done', circleDone, {primary: true, aria: 'Done circle selecting'}),
+      chip('', 'Add', () => mode('add'), {on: CIRCLE.op==='add', aria: 'Circle add selection'}),
+      chip('', 'Remove', () => mode('sub'), {on: CIRCLE.op==='sub', aria: 'Circle remove selection'}),
+      h('label', {class: 'chip'}, 'Radius', size),
+      chip('', '−', () => circleRadius(CIRCLE.radius-8), {aria: 'Smaller selection circle'}),
+      chip('', '+', () => circleRadius(CIRCLE.radius+8), {aria: 'Larger selection circle'}));
+    bar.scrollLeft=0;
     return;
   }
   if (S.tool === 'knife') {
@@ -263,11 +278,13 @@ function buildSubbar() {
 const TOOLS3D = [['select', 'select', 'Tap select'], ['box', 'box', 'Box select'], ['cursor', 'cursor', 'Place 3D cursor'], ['ruler', 'ruler', 'Ruler · Measure'], null, ['move', 'move', 'Move gizmo'], ['rotate', 'rotate', 'Rotate gizmo'], ['scale', 'scale', 'Scale gizmo']];
 function buildTools() {
   const col = $('#tools'); col.innerHTML = '';
-  const modelTools = S.mode === 'edit' ? [...TOOLS3D.slice(0,4), ['knife', 'knife', 'Knife tool · K'], ['inset', 'inset', 'Inset faces · I'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : TOOLS3D;
+  circleCursor();
+  const selectionTools = [...TOOLS3D.slice(0,2), ['circle','circleSelect','Circle select · C'], ...TOOLS3D.slice(2,4)];
+  const modelTools = S.mode === 'edit' ? [...selectionTools, ['knife', 'knife', 'Knife tool · K'], ['inset', 'inset', 'Inset faces · I'], ['extrude', 'extrude', 'Extrude tool'], ...TOOLS3D.slice(4)] : [...selectionTools,...TOOLS3D.slice(4)];
   for (const t of (S.workspace === 'model' ? modelTools : S.workspace === 'kcl' ? [['select','select','Pick collision material'], null, ...TOOLS3D.slice(5)] : [['place','cursor','Place Start'],['aim','rotate','Aim Start'], null, ...TOOLS3D.slice(5,7)])) {
     if (!t) { col.append(h('hr')); continue; }
     const b = h('button', { class: (S.workspace === 'kmp' && S.tool === 'select' ? TRACKVIEW.action : S.tool) === t[0] ? 'on' : '', html: icon(t[1]), 'aria-label': t[2], title: t[2] });
-    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
+    b.addEventListener('click', () => { setEditorFocus('3d'); if (t[0] === 'circle') { circleActivate(); return; } if (S.tool === 'circle') circleDone(); if (t[0] === 'knife') { knifeActivate(); return; } if (S.tool === 'knife') knifeCancel(); if (S.workspace === 'kmp' && ['place','aim'].includes(t[0])) { trackAction(t[0]); return; } if (S.workspace !== 'model') { trackTool(t[0]); return; } if (t[0] === 'ruler') { rulerActivate(); return; } if (t[0] === 'extrude') { activateExtrude(); return; } if (t[0] === 'inset') { opInset(); return; } S.tool = t[0]; S.pendingTap = null; rulerResetPending(); hint(null); buildTools(); buildSubbar(); gizmoSync(); });
     col.append(b);
   }
   if (S.workspace === 'model') col.append(h('hr'), h('button', {
@@ -460,7 +477,8 @@ function menuSelect() {
     { label: 'More', icon: 'plus', key: 'Ctrl +', run: () => opSelect('more') },
     { label: 'Less', icon: 'minus', key: 'Ctrl −', run: () => opSelect('less') },
     { group: 'Pick' },
-    { label: 'Edge Loop…', icon: 'loopcut', desc: 'Then tap an edge (or double-tap any edge)', run: () => opSelect('loop') },
+    { label: 'Circle Select', icon: 'circleSelect', key: 'C', desc: 'Drag to paint a selection', run: circleActivate },
+    { label: 'Edge Loop…', icon: 'loopcut', desc: 'Tap a wire or surface edge; double-tap surface edges in Edge mode', run: () => opSelect('loop') },
     { label: 'Edge Ring…', icon: 'subdivide', desc: 'Then tap an edge', run: () => opSelect('ring') },
     { label: 'Boundary Loop', icon: 'select', desc: 'Outline of the selected faces', run: () => opSelect('boundary') },
   ]);
@@ -618,6 +636,7 @@ function confirmNew() {
   });
 }
 function newScene() {
+  circleReset();
   if (TF.active) tfCancel(); if (PM.active) pmCancel();
   for (const o of [...S.objects]) disposeObject(o);
   clearImages(); S.multiSelect = false; S.selOp = 'set';
@@ -1048,7 +1067,8 @@ function openHelp() {
       tip('Axis ball (top right)', 'tap an axis for front, side or top view; tap again for the opposite side.'),
       tip('Move / Rotate / Scale', 'tools on the left show handles you drag directly. In 3D, keyboard G / R / S starts a transform: drag, lock X / Y / Z, type a number, then Done.'),
       tip('Edit Mode', 'models the active object. Pick vertex, edge or face selection at the top.'),
-      tip('Double-tap an edge', 'selects its whole edge loop.'),
+      tip('Circle select (C)', 'drag to paint vertices, edges, face centers or objects. Radius changes the brush size; Remove erases selection. Wheel or +/− resizes, middle mouse or Shift-drag removes, Done/Enter/Escape finishes. Two fingers still navigate.'),
+      tip('Double-tap a surface edge', 'in Edge mode selects its whole edge loop. Loose edges and vertex picks stay individual; use Select → Edge Loop explicitly for wire chains.'),
       tip('Set / Add / Sub', 'controls whether taps and box selections replace, add to or remove from the selection.'),
       tip('Adjust Last Operation', 'appears bottom-left after adding shapes or using tools: change segments, cuts, margins and more.'),
       tip('Multiselect', 'Hold a vertex, edge, face or object for a moment, then tap to add or remove more. Tap Done in the top bar to finish.'),
@@ -1080,6 +1100,7 @@ hideRedoPanel = () => { $('#redo').hidden = true; };
 
 // ---------- hooks ----------
 onSelectionChanged = () => {
+  circleCursor();
   if (S.tool === 'knife' && !knifeActive()) knifeCancel();
   trackRefresh();
   for (const o of S.objects) refreshOverlays(o);
@@ -1109,7 +1130,7 @@ onHistoryChanged = () => {
 };
 afterRestore = () => { onModeChanged(); onSelectionChanged(); buildSubbar(); };
 const _origSetSelectMode = setSelectMode;
-setSelectMode = function (m) { _origSetSelectMode(m); onModeChanged(); };
+setSelectMode = function (m) { circleEnd(false); G.lastTap = null; _origSetSelectMode(m); onModeChanged(); };
 
 // ---------- 3D viewport gestures ----------
 const G = { p: new Map(), mode: null, maxPointers: 0, t0: 0, moved: false, lastTap: null };
@@ -1142,6 +1163,7 @@ c3d.addEventListener('contextmenu', (e) => e.preventDefault());
 c3d.addEventListener('pointerdown', (e) => {
   cancelHold();
   setEditorFocus('3d');
+  if (circleActive() && e.pointerType === 'mouse' && e.button === 2) { circleDone(); e.preventDefault(); return; }
   if (tc.enabled && (tc.dragging || tc.axis)) return;
   if (document.activeElement && document.activeElement.blur && document.activeElement !== document.body) document.activeElement.blur();
   try { c3d.setPointerCapture(e.pointerId); } catch (err) { /* ignore */ }
@@ -1151,7 +1173,9 @@ c3d.addEventListener('pointerdown', (e) => {
   if (G.p.size === 1) {
     G.t0 = performance.now(); G.moved = false; G.maxPointers = 1;
     G.extrudeCandidate = false;
-    if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
+    if (circleActive() && !e.altKey && (e.button === 0 || e.button === 1)) { G.mode='circle'; circleBegin(p, e.button===1 || e.shiftKey); }
+    else if (circleActive() && e.altKey) G.mode=e.shiftKey ? 'pan' : 'orbit';
+    else if (e.pointerType === 'mouse' && e.button === 2 && e.ctrlKey && S.mode === 'edit' && S.workspace === 'model' && S.tool !== 'knife' && !TF.active && !PM.active) G.mode = 'extrudeTap';
     else if (e.pointerType === 'mouse' && (e.button === 1 || e.button === 2)) G.mode = e.shiftKey ? 'pan' : e.ctrlKey ? 'zoom' : 'orbit';
     else if (e.pointerType === 'mouse' && TF.active) G.mode = 'tfclick';
     else G.mode = 'pending';
@@ -1160,6 +1184,7 @@ c3d.addEventListener('pointerdown', (e) => {
       beginHold(e, p);
     }
   } else if (G.p.size === 2) {
+    circleEnd(true); circleCursor(null);
     if (TF.active?.quickExtrude) tfCancel();
     G.extrudeCandidate = false;
     if (G.mode === 'box') { $('#boxrect').hidden = true; }
@@ -1169,6 +1194,7 @@ c3d.addEventListener('pointerdown', (e) => {
 c3d.addEventListener('pointermove', (e) => {
   const p = rel(e);
   if (!G.p.has(e.pointerId)) {
+    if (circleActive() && G.p.size === 0) circleCursor(p);
     if (knifeActive() && G.p.size === 0) { KNIFE.hover = knifePick(p.x, p.y, 18); requestRender(); }
     if (S.tool === 'ruler' && G.p.size === 0 && !TF.active && !PM.active) { RULER.hover = rulerPick(p.x,p.y,18); requestRender(); }
     // desktop: modal transforms follow the hovering mouse like Blender
@@ -1200,6 +1226,7 @@ c3d.addEventListener('pointermove', (e) => {
     G.two = t; CAM.viewName = CAM.ortho && CAM.autoOrtho && !G.twisting ? CAM.viewName : null;
     return;
   }
+  if (G.mode === 'circle') { circlePaint(p); return; }
   if (G.mode === 'pending' && G.moved) {
     if (TF.active) G.mode = 'tf';
     else if (PM.active) G.mode = 'pm';
@@ -1231,6 +1258,11 @@ function endPointer(e) {
   G.p.delete(e.pointerId);
   if (G.p.size > 0) { if (G.mode === 'two' && G.p.size === 1) G.mode = 'none'; return; }
   const quick = performance.now() - G.t0 < 320;
+  if (G.mode === 'circle') {
+    if (e.type === 'pointerup') circlePaint(rel(e));
+    circleEnd(e.type !== 'pointerup');
+    if (pt.type !== 'mouse') circleCursor(null);
+  }
   if (G.mode === 'quickExtrude' && TF.active?.quickExtrude) {
     if (e.type === 'pointerup') tfConfirm(); else tfCancel();
   }
@@ -1248,10 +1280,11 @@ function endPointer(e) {
 c3d.addEventListener('pointerup', endPointer);
 c3d.addEventListener('pointercancel', endPointer);
 c3d.addEventListener('lostpointercapture', endPointer);
-function cancelViewportGesture() { cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
+function cancelViewportGesture() { circleEnd(true); circleCursor(null); cancelHold(); if (TF.active?.quickExtrude) tfCancel(); G.p.clear(); G.mode = null; G.extrudeCandidate = false; $('#boxrect').hidden = true; }
 window.addEventListener('blur', cancelViewportGesture);
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
-c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
+c3d.addEventListener('pointerleave', () => { if (!CIRCLE.stroke) circleCursor(null); });
+c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (circleActive()) { circleRadius(CIRCLE.radius + (e.deltaY < 0 ? 4 : -4)); return; } if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('gesturechange', (e) => e.preventDefault());
 
@@ -1265,13 +1298,19 @@ function handleTap(x, y, ptype) {
   if (S.pendingTap === 'loop' || S.pendingTap === 'ring') { loopSelectAt(x, y, S.pendingTap, S.selOp); return; }
   if (S.tool === 'ruler') { rulerTap(x,y,radius); return; }
   if (S.tool === 'cursor') { placeCursor(x, y); return; }
-  const now = performance.now();
-  const dbl = S.tool !== 'extrude' && !S.multiSelect && G.lastTap && now - G.lastTap.t < 350 && Math.hypot(x - G.lastTap.x, y - G.lastTap.y) < 24;
-  G.lastTap = { t: now, x, y };
+  const now = performance.now(), previous = G.lastTap;
+  G.lastTap = null;
   if (S.mode === 'edit' && S.active) {
-    if (dbl && S.selectMode !== 'vert') { G.lastTap = null; loopSelectAt(x, y, 'loop', S.selOp === 'sub' ? 'sub' : 'add'); return; }
-    if (dbl && S.selectMode === 'vert') { const el = pickEdgeAny(x, y); if (el) { G.lastTap = null; loopSelectAt(x, y, 'loop', 'add'); return; } }
     const el = pickElement(x, y, radius);
+    // Never turn rapid vertex/loose-edge taps into a whole wire-chain pick.
+    // Surface loop gestures require the same edge in the same object/mode.
+    if (el?.type === 'edge' && S.tool !== 'extrude' && !S.multiSelect) {
+      const T=topo(S.active.mesh), surface=T.edgeFaces[T.edgeIndex.get(el.key)]?.length;
+      if (surface && previous?.object===S.active && previous.key===el.key && now-previous.t<350 && Math.hypot(x-previous.x,y-previous.y)<24) {
+        loopSelectAt(x,y,'loop',S.selOp==='sub'?'sub':'add'); return;
+      }
+      if (surface) G.lastTap={t:now,x,y,key:el.key,object:S.active};
+    }
     if (el) toggleInSel(el, S.selOp);
     else if (S.selOp === 'set') S.active.esel = emptySel();
     onSelectionChanged();
@@ -1432,6 +1471,13 @@ document.addEventListener('keydown', (e) => {
     if (k === 'Tab') { e.preventDefault(); knifeCancel(); setMode('object'); return; }
     if (!e.code?.startsWith('Numpad') && k !== 'Home') return;
   }
+  if (circleActive()) {
+    if (['Escape','Enter'].includes(k)) { e.preventDefault(); circleDone(); return; }
+    if (['+','=','-','[',']'].includes(k) || ['NumpadAdd','NumpadSubtract'].includes(e.code)) {
+      e.preventDefault(); circleRadius(CIRCLE.radius+(['-','['].includes(k)||e.code==='NumpadSubtract' ? -4 : 4)); return;
+    }
+    if (ctrl && k.toLowerCase()==='z' && CIRCLE.stroke) { e.preventDefault(); circleEnd(true); return; }
+  }
   if (ctrl && (k === 'z' || k === 'Z')) { e.preventDefault(); if (e.shiftKey) redo(); else undo(); return; }
   if (ctrl && k === 'y') { e.preventDefault(); redo(); return; }
   if (isUVFocused()) {
@@ -1486,6 +1532,7 @@ document.addEventListener('keydown', (e) => {
   if (ctrl && k === '-' && edit) { e.preventDefault(); opSelect('less'); return; }
   if (ctrl || e.altKey) return;
   switch (lk) {
+    case 'c': circleActivate(); break;
     case 'g': tfStart('move'); break;
     case 'r': tfStart('rotate'); break;
     case 's': tfStart('scale'); break;
@@ -1506,6 +1553,8 @@ document.addEventListener('keydown', (e) => {
 
 // ---------- boot ----------
 function loadSettings() {
+  const circleSize = Number(settingsGet('circleRadius', 40));
+  CIRCLE.radius = Number.isFinite(circleSize) ? clamp(circleSize, 8, 160) : 40;
   S.extrudeQuick = settingsGet('extrudeQuick', true) !== false;
   S.extrudeVerticesOnly = settingsGet('extrudeVerticesOnly', false) === true;
   S.extrudeTap = settingsGet('extrudeTap', false) === true;
@@ -1553,7 +1602,7 @@ async function boot() {
   }
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') { clearTimeout(_saveT); try { idbSet('autosave', JSON.stringify(serializeProject())); } catch (e) { /* best effort */ } } });
   window.UV_dbg = () => ({ scale: UV.scale, rot: UV.rot / DEG }); window.UV_s = (u, v) => u2s(u, v);
-  window.__pm = { KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
+  window.__pm = { CIRCLE, circleActivate, circleDone, pickElement, toggleInSel, KNIFE, knifePick, knifeApply, knifeCancel, activateExtrude, tapExtrudeAt, setTrackScale, szsProjectFile, setBackfaceOverlay, setShading, SZED, loadSZSEditor, szsApplyProject, szsWorker, inspectSZS, saveSZS, szsEntryBytes, tc, gizmoProxy, trackTool, trackAction, setWorkspace, trackTriangles, TRACKVIEW, trackRefresh, trackSnapStart, trackToWii, exportKMP, inspectKMP, exportKCL, pushUndo, S, CAM, UNDO, RULER, rulerPick, rulerTap, rulerActivate, openRuler, BRED, openBRRESEditor, loadBRRESEditor, saveBRRESEdits, decodeBRRESTexture, inspectBRRES, serializeProject, loadProject, undo, redo, rebuildObject, changeModifiers, downscaleMaterialImage, addImageFromCanvas, importMaterialFiles, editSelectAll, applyCamera, tfAxisVec: () => TF.active && tfAxisVec(TF.active), runExport, tfStart, tfConfirm, setMode, setSelectMode, opExtrude, opUnwrap, primCube, topo, faceCenter, faceNormal,
     screenOf: (x, y, z) => { const o = S.active; const v = new THREE.Vector3(x, y, z); if (o) v.applyMatrix4(o.node.matrixWorld); const s = toScreen(v); const r = c3d.getBoundingClientRect(); return { x: s.x + r.left, y: s.y + r.top }; } };
 }
 boot();
