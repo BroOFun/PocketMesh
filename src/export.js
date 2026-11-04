@@ -1,7 +1,7 @@
 // PocketMesh export / import module.
 // Exporters: OBJ(+MTL), glTF 2.0 (.glb / .gltf), COLLADA 1.4.1 (.dae), binary FBX 7.4,
 // plus a STORE-only ZIP writer and an OBJ importer.
-// Pure, dependency-free JS. No imports. Private top-level helpers are prefixed `_ex`.
+// Pure JS with shared triangulate.js helpers. No imports. Private top-level helpers are prefixed `_ex`.
 
 // ---------------------------------------------------------------------------
 // Options, small utilities
@@ -248,92 +248,8 @@ function _exSmoothCornerNormals(verts, faces, creases) {
   return faces.map((f, fi) => f.v.map((_, i) => sums.get(root(offsets[fi] + i))));
 }
 
-// Triangulate a polygon (array of 3D points). Returns [[i,j,k], ...] with local indices,
-// keeping the polygon's winding. Ear clipping on the projection onto the Newell plane.
-function _exTriangulate(pts, normal) {
-  const n = pts.length;
-  if (n < 3) return [];
-  if (n === 3) return [[0, 1, 2]];
-  let N = normal || _exNewell(pts);
-  let l = Math.hypot(N[0], N[1], N[2]);
-  if (!(l > 0) || !Number.isFinite(l)) {
-    const tris = [];
-    for (let i = 1; i < n - 1; i++) tris.push([0, i, i + 1]);
-    return tris;
-  }
-  N = [N[0] / l, N[1] / l, N[2] / l];
-  if (n === 4) {
-    // convex quad (every corner turns left about N): fan split
-    let convex = true;
-    for (let i = 0; i < 4 && convex; i++) {
-      const a = pts[(i + 3) & 3], b = pts[i], c = pts[(i + 1) & 3];
-      const e1x = b[0] - a[0], e1y = b[1] - a[1], e1z = b[2] - a[2];
-      const e2x = c[0] - b[0], e2y = c[1] - b[1], e2z = c[2] - b[2];
-      const d = (e1y * e2z - e1z * e2y) * N[0] + (e1z * e2x - e1x * e2z) * N[1] + (e1x * e2y - e1y * e2x) * N[2];
-      if (!(d > l * 1e-12)) convex = false;
-    }
-    if (convex) return [[0, 1, 2], [0, 2, 3]];
-  }
-  // Orthonormal basis (u, v, N), right-handed so CCW about N stays CCW in 2D.
-  const ref = Math.abs(N[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0];
-  let u = [ref[1] * N[2] - ref[2] * N[1], ref[2] * N[0] - ref[0] * N[2], ref[0] * N[1] - ref[1] * N[0]];
-  u = _exNormalize(u);
-  const v = [N[1] * u[2] - N[2] * u[1], N[2] * u[0] - N[0] * u[2], N[0] * u[1] - N[1] * u[0]];
-  const xs = new Float64Array(n), ys = new Float64Array(n);
-  let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
-  for (let i = 0; i < n; i++) {
-    const p = pts[i];
-    xs[i] = p[0] * u[0] + p[1] * u[1] + p[2] * u[2];
-    ys[i] = p[0] * v[0] + p[1] * v[1] + p[2] * v[2];
-    if (xs[i] < minx) minx = xs[i];
-    if (xs[i] > maxx) maxx = xs[i];
-    if (ys[i] < miny) miny = ys[i];
-    if (ys[i] > maxy) maxy = ys[i];
-  }
-  const diag2 = (maxx - minx) * (maxx - minx) + (maxy - miny) * (maxy - miny);
-  const eps = diag2 * 1e-12;
-  const cross = (a, b, c) => (xs[b] - xs[a]) * (ys[c] - ys[a]) - (ys[b] - ys[a]) * (xs[c] - xs[a]);
-  if (n === 4 && cross(0, 1, 2) > eps && cross(1, 2, 3) > eps && cross(2, 3, 0) > eps && cross(3, 0, 1) > eps) {
-    return [[0, 1, 2], [0, 2, 3]];
-  }
-  const same = (a, b) => Math.abs(xs[a] - xs[b]) <= 1e-12 * (1 + Math.abs(xs[a])) && Math.abs(ys[a] - ys[b]) <= 1e-12 * (1 + Math.abs(ys[a]));
-  const idx = [];
-  for (let i = 0; i < n; i++) idx.push(i);
-  const tris = [];
-  while (idx.length > 3) {
-    const m = idx.length;
-    // reflex / collinear vertices are the only ones that can block an ear
-    const reflex = [];
-    for (let i = 0; i < m; i++) {
-      if (cross(idx[(i + m - 1) % m], idx[i], idx[(i + 1) % m]) <= eps) reflex.push(idx[i]);
-    }
-    let ear = -1;
-    for (let i = 0; i < m && ear < 0; i++) {
-      const a = idx[(i + m - 1) % m], b = idx[i], c = idx[(i + 1) % m];
-      if (cross(a, b, c) <= eps) continue;
-      let ok = true;
-      for (let j = 0; j < reflex.length; j++) {
-        const p = reflex[j];
-        if (p === a || p === b || p === c || same(p, a) || same(p, b) || same(p, c)) continue;
-        if (cross(a, b, p) >= -eps && cross(b, c, p) >= -eps && cross(c, a, p) >= -eps) { ok = false; break; }
-      }
-      if (ok) ear = i;
-    }
-    if (ear < 0) {
-      // Degenerate or self-intersecting input: clip the "most convex" vertex.
-      let best = 0, bestv = -Infinity;
-      for (let i = 0; i < m; i++) {
-        const cr = cross(idx[(i + m - 1) % m], idx[i], idx[(i + 1) % m]);
-        if (cr > bestv) { bestv = cr; best = i; }
-      }
-      ear = best;
-    }
-    tris.push([idx[(ear + m - 1) % m], idx[ear], idx[(ear + 1) % m]]);
-    idx.splice(ear, 1);
-  }
-  tris.push([idx[0], idx[1], idx[2]]);
-  return tris;
-}
+// Use the same diagonals in the viewport, explicit triangulation and exports.
+function _exTriangulate(pts, normal) { return triangulatePolygon(pts); }
 
 // ---------------------------------------------------------------------------
 // Scene preparation shared by all exporters

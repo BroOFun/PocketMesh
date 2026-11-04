@@ -120,62 +120,9 @@ function _project2D(pts3, n) {
   return pts3.map((p) => (s >= 0 ? [p[i0], p[i1]] : [p[i1], p[i0]]));
 }
 function _area2(a, b, c) { return (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]); }
-export function earClip2D(P) {
-  const n = P.length;
-  if (n < 3) return [];
-  if (n === 3) return [[0, 1, 2]];
-  // make CCW
-  let area = 0;
-  for (let i = 0; i < n; i++) { const a = P[i], b = P[(i + 1) % n]; area += a[0] * b[1] - b[0] * a[1]; }
-  const idx = [];
-  for (let i = 0; i < n; i++) idx.push(i);
-  if (area < 0) idx.reverse();
-  const tris = [];
-  let guard = 0;
-  const eps = 1e-14 * Math.max(1, Math.abs(area));
-  while (idx.length > 3 && guard++ < 10000) {
-    let found = false;
-    const L = idx.length;
-    for (let i = 0; i < L; i++) {
-      const a = idx[(i + L - 1) % L], b = idx[i], c = idx[(i + 1) % L];
-      if (_area2(P[a], P[b], P[c]) <= eps) continue;
-      let ok = true;
-      for (const p of idx) {
-        if (p === a || p === b || p === c) continue;
-        const q = P[p];
-        if (_area2(P[a], P[b], q) > eps && _area2(P[b], P[c], q) > eps && _area2(P[c], P[a], q) > eps) { ok = false; break; }
-      }
-      if (!ok) continue;
-      tris.push([a, b, c]);
-      idx.splice(i, 1);
-      found = true;
-      break;
-    }
-    if (!found) { const L2 = idx.length; tris.push([idx[L2 - 1], idx[0], idx[1]]); idx.splice(0, 1); }
-  }
-  if (idx.length === 3) tris.push([idx[0], idx[1], idx[2]]);
-  if (area < 0) for (const t of tris) { const tmp = t[1]; t[1] = t[2]; t[2] = tmp; }
-  return tris;
-}
-// triangulate a face -> array of [ci, cj, ck] corner indices (winding preserved)
-export function triangulateFace(m, f) {
-  const n = f.v.length;
-  if (n === 3) return [[0, 1, 2]];
-  const pts = f.v.map((i) => m.verts[i]);
-  const nrm = faceNormalRaw(m, f);
-  if (n === 4) {
-    // fast path for convex quads: split along shorter diagonal
-    const p2 = _project2D(pts, nrm);
-    let convex = true;
-    for (let i = 0; i < 4; i++) if (_area2(p2[i], p2[(i + 1) % 4], p2[(i + 2) % 4]) <= 0) { convex = false; break; }
-    if (convex) {
-      const d02 = vlen(vsub(pts[0], pts[2])), d13 = vlen(vsub(pts[1], pts[3]));
-      return d02 <= d13 ? [[0, 1, 2], [0, 2, 3]] : [[0, 1, 3], [1, 2, 3]];
-    }
-  }
-  if (vlen(nrm) < 1e-14) { const t = []; for (let i = 1; i < n - 1; i++) t.push([0, i, i + 1]); return t; }
-  return earClip2D(_project2D(pts, nrm));
-}
+// Shared quality triangulation; return corner indices to preserve per-face UVs.
+export function earClip2D(P) { return triangulatePolygon2D(P); }
+export function triangulateFace(m, f) { return triangulatePolygon(f.v.map(v => m.verts[v])); }
 
 // vertex normals (area weighted) for smooth shading
 export function vertexNormals(m) {
@@ -1371,16 +1318,19 @@ export function recalcNormals(m, fset, inside = false) {
 // ---------- TRIANGULATE / TRIS TO QUADS ----------
 export function triangulateFaces(m, fset) {
   const out = new Set();
+  let skipped = 0, changed = 0;
   for (const fi of [...fset]) {
     const f = m.faces[fi];
     if (f.v.length <= 3) { out.add(fi); continue; }
     const tris = triangulateFace(m, f);
+    if (tris.length !== f.v.length - 2) { out.add(fi); skipped++; continue; }
     const make = (t) => _face(t.map((c) => f.v[c]), t.map((c) => f.uv[c].slice()), f.mat);
     m.faces[fi] = make(tris[0]); out.add(fi);
     for (let i = 1; i < tris.length; i++) { m.faces.push(make(tris[i])); out.add(m.faces.length - 1); }
+    changed++;
   }
   touch(m);
-  return { faces: out };
+  return { faces: out, skipped, changed };
 }
 export function trisToQuads(m, fset, maxAngleDeg = 40) {
   const T = topo(m);

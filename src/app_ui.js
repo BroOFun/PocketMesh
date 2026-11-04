@@ -180,7 +180,7 @@ function buildSubbar() {
   const bar = $('#sub');
   bar.innerHTML = '';
   const chip = (lbl, val, run, opts = {}) => {
-    const b = h('button', { class: 'chip' + (opts.on ? ' on' : ''), 'aria-label': opts.aria || lbl }, opts.icon ? h('span', { html: icon(opts.icon), style: { display: 'grid' } }) : null, lbl ? h('span', { class: 'lbl' }, lbl) : null, val ? h('span', {}, val) : null);
+    const b = h('button', { class: 'chip' + (opts.on ? ' on' : '') + (opts.primary ? ' primary' : ''), 'aria-label': opts.aria || lbl }, opts.icon ? h('span', { html: icon(opts.icon), style: { display: 'grid' } }) : null, lbl ? h('span', { class: 'lbl' }, lbl) : null, val ? h('span', {}, val) : null);
     b.addEventListener('click', run);
     return b;
   };
@@ -194,11 +194,12 @@ function buildSubbar() {
     return;
   }
   if (S.tool === 'knife') {
-    bar.append(chip('Knife', 'Vertex snap', () => toast('Vertices snap automatically · green ring marks a snapped vertex'), {icon: 'magnet', on: true, aria: 'Knife vertex snapping always on'}),
-      chip('', 'Apply', knifeApply, {on: KNIFE.edges.size > 0, aria: 'Apply knife cuts'}),
+    bar.append(chip('', 'Done', knifeApply, {primary: true, aria: 'Done · apply knife cuts'}),
       chip('', 'Cancel', knifeCancel, {aria: 'Cancel knife cuts'}),
       chip('', 'New cut', () => { KNIFE.first = null; KNIFE.hover = null; requestRender(); }),
-      chip('', 'Undo cut', knifeUndo));
+      chip('', 'Undo cut', knifeUndo),
+      chip('Knife', 'Snap', () => { KNIFE.snap = !KNIFE.snap; KNIFE.hover = null; buildSubbar(); requestRender(); }, {icon: 'magnet', on: KNIFE.snap, aria: 'Knife snapping'}));
+    bar.scrollLeft = 0;
     return;
   }
   if (S.tool === 'extrude' && S.mode === 'edit' && S.workspace === 'model') {
@@ -430,7 +431,7 @@ function buildShelf() {
   } else {
     sh.append(
       shelfBtn('Add', 'plus', menuAdd, true), shelfBtn('Select', 'selall', menuSelect, true), g(),
-      shelfBtn('Extrude', 'extrude', activateExtrude), shelfBtn('Inset', 'inset', opInset), shelfBtn('Loop Cut', 'loopcut', opLoopCutStart), shelfBtn('Subdivide', 'subdivide', opSubdivide),
+      shelfBtn('Extrude', 'extrude', activateExtrude), shelfBtn('Inset', 'inset', opInset), shelfBtn('Loop Cut', 'loopcut', opLoopCutStart), shelfBtn('Triangulate', 'tri', opTriangulate), shelfBtn('Subdivide', 'subdivide', opSubdivide),
       shelfBtn('Fill', 'fill', menuFill, true), shelfBtn('Merge', 'merge', menuMerge, true), shelfBtn('Duplicate', 'duplicate', opDuplicate),
       shelfBtn('Mesh', 'cube', menuMesh, true), g(),
       shelfBtn('UV', 'uv', menuUVFrom3D, true), shelfBtn('Seams', 'seam', () => menuSheet('UV Seams', [{ label: 'Mark Seam', icon: 'seam', desc: 'Selected edges become cuts for Unwrap', run: () => opSeam(true) }, { label: 'Clear Seam', icon: 'seam', run: () => opSeam(false) }]), true),
@@ -503,7 +504,7 @@ function menuMesh() {
     { label: 'Shrink / Fatten', icon: 'normals', key: 'Alt S', desc: 'Move along vertex normals', run: () => tfStart('shrink') },
     { group: 'Faces' },
     { label: 'Inset Faces', icon: 'inset', key: 'I', desc: 'Inset selected faces, including n-gons', run: opInset },
-    { label: 'Triangulate Faces', icon: 'tri', key: 'Ctrl T', run: opTriangulate },
+    { label: 'Triangulate Faces', icon: 'tri', key: 'Ctrl T', desc: 'Quads and n-gons · improve triangle shapes', run: opTriangulate },
     { label: 'Tris to Quads', icon: 'subdivide', key: 'Alt J', run: opTrisToQuads },
     { group: 'Normals & Shading' },
     { label: 'Recalculate Outside', icon: 'normals', key: 'Shift N', run: () => opNormals('outside') },
