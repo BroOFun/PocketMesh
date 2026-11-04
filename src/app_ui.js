@@ -983,7 +983,7 @@ function buildExport(body) {
   // BRRES gets its own explicit scope preference. Old exports automatically
   // saved selectedOnly=true, which could silently omit the rest of a track.
   const selectedOnly = st.fmt === 'brres' ? st.brresSelectedOnly === true : st.selectedOnly;
-  const save = () => settingsSet('export', st);
+  const save = () => { settingsSet('export', st); szsScheduleSync(); };
   const notes = {
     brres: 'Wii model + textures (course, MDL0 v11). For RiiStudio, BrawlCrate and noclip. A playable track also needs KCL collision, KMP race data and an SZS package.',
     obj: 'Wavefront OBJ + MTL. Comes as a .zip with its textures; tap the zip in Files to unpack it.',
@@ -1128,6 +1128,7 @@ onHistoryChanged = () => {
   $('#btnRedo').disabled = UNDO.idx >= UNDO.stack.length - 1;
   if (LAST.op && LAST.op.idx !== UNDO.idx) { LAST.op = null; hideRedoPanel(); }
   scheduleAutosave();
+  szsScheduleSync();
 };
 afterRestore = () => { onModeChanged(); onSelectionChanged(); buildSubbar(); };
 const _origSetSelectMode = setSelectMode;

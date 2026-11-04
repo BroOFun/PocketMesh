@@ -9,7 +9,109 @@ const SZED = {
   busy: '',
   error: '',
   target: null,
+  auto: true,
+  sync: new Map(),
+  notice: '',
+  revision: 0,
 };
+const SZS_COURSE_FILES = ['course_model.brres', 'course.kcl', 'course.kmp'];
+let szsSyncTimer;
+const szsImageKeys = new WeakMap();
+function szsEditing() { return TF.active || PM.active || GZ || CHECKPOINT.drag; }
+// Export dependencies only: camera, workspace, selection and ruler changes do
+// not regenerate course files. Image byte arrays are immutable after import.
+function szsProjectKeys() {
+  const objects = S.objects.filter((o) => o.visible).map((o) => ({
+    name: o.name, position: o.node.position.toArray(), quaternion: o.node.quaternion.toArray(),
+    scale: o.node.scale.toArray(), materials: o.materials, modifiers: o.modifiers,
+    mesh: { verts: o.mesh.verts, faces: o.mesh.faces, smooth: o.mesh.smooth,
+      creases: [...(o.mesh.creases || [])], looseEdges: o.mesh.looseEdges },
+  }));
+  const used = new Set(objects.flatMap((o) => o.materials));
+  const materials = S.materials.filter((m) => used.has(m.id));
+  const images = materials.map((m) => {
+    const im = m.texture && m.useTexture !== false ? S.images.get(m.texture) : null;
+    if (!im) return null;
+    if (!szsImageKeys.has(im.bytes)) szsImageKeys.set(im.bytes, b64FromBytes(im.bytes));
+    return [im.id, im.name, im.width, im.height, szsImageKeys.get(im.bytes)];
+  });
+  return {
+    'course_model.brres': JSON.stringify([S.track.scale, objects, materials, images, settingsGet('export', {}).textureSize || 512]),
+    'course.kcl': JSON.stringify([S.track.scale, objects, materials.map((m) => [m.id, m.kclEnabled, m.kclFinish, m.kclFlag])]),
+    'course.kmp': JSON.stringify([S.track.scale, S.track.start, S.track.template, S.track.checkpoints]),
+  };
+}
+function szsSyncState(name) {
+  if (!SZED.sync.has(name)) SZED.sync.set(name, { key: null, paused: false, error: '', updated: '', status: 'Waiting for project' });
+  return SZED.sync.get(name);
+}
+function szsPauseFile(id) {
+  const name = SZED.archive?.nodes[id]?.name.toLowerCase();
+  if (!SZS_COURSE_FILES.includes(name)) return;
+  const state = szsSyncState(name);
+  state.paused = true;
+  state.error = '';
+  state.status = 'Paused · keeping the current archive file';
+  SZED.notice = name + ': automatic updates paused to keep your manual file. Resume below to use the project again.';
+}
+function szsScheduleSync() {
+  clearTimeout(szsSyncTimer);
+  if (!SZED.archive || !SZED.auto) return;
+  szsSyncTimer = setTimeout(() => {
+    if (SZED.busy || szsEditing()) { szsScheduleSync(); return; }
+    try { szsSyncProject(); } catch (e) { szsError(e); }
+  }, 800);
+}
+function szsSyncProject({ force = false, notify = true } = {}) {
+  if (!SZED.archive || !SZED.auto || SZED.busy) return;
+  if (szsEditing()) { szsScheduleSync(); return; }
+  clearTimeout(szsSyncTimer);
+  const keys = szsProjectKeys(), updated = [], failed = [], resolved = [];
+  for (const name of SZS_COURSE_FILES) {
+    const state = szsSyncState(name);
+    if (state.paused || (!force && state.key === keys[name])) continue;
+    const oldError = state.error;
+    state.key = keys[name];
+    state.error = '';
+    try {
+      const matches = SZED.archive.nodes.filter((n) => !n.directory && n.name.toLowerCase() === name);
+      if (matches.length !== 1) throw new Error(matches.length ? 'Multiple entries; replace them manually.' : 'Missing from this archive.');
+      const id = matches[0].id, bytes = _szsBytes(szsProjectFile(name));
+      const current = szsEntryBytes(SZED.archive, id, SZED.changes);
+      if (bytes.length !== current.length || bytes.some((b, i) => b !== current[i])) {
+        szsStage(id, bytes, { project: true, refresh: false });
+        state.updated = new Date().toLocaleTimeString();
+        updated.push(name);
+      }
+      state.status = state.updated ? 'Updated ' + state.updated : 'Already matches project';
+      if (oldError && !updated.includes(name)) resolved.push(name);
+    } catch (e) {
+      state.error = e.message || String(e);
+      state.status = 'Needs attention · ' + state.error;
+      if (state.error !== oldError) failed.push(name);
+    }
+  }
+  const messages = [];
+  if (updated.length) messages.push('Automatically updated: ' + updated.join(', ') + '. Save SZS to keep these changes.');
+  if (resolved.length) messages.push('Now up to date: ' + resolved.join(', ') + '.');
+  if (failed.length) messages.push('Could not update: ' + failed.join(', ') + '. See file status below.');
+  if (messages.length) {
+    SZED.notice = messages.join(' ');
+    if (notify) toast(SZED.notice, !!failed.length);
+  }
+  szsRefresh();
+}
+function szsSyncProblems() {
+  return SZED.auto ? SZS_COURSE_FILES.filter((name) => {
+    const state = szsSyncState(name);
+    return !state.paused && state.error;
+  }) : [];
+}
+function szsSaveStamp() {
+  const keys = SZED.auto ? szsProjectKeys() : {};
+  return JSON.stringify([SZED.revision, SZED.auto, SZS_COURSE_FILES.map((name) =>
+    [szsSyncState(name).paused, szsSyncState(name).paused ? null : keys[name]])]);
+}
 function szsWorker(action, payload) {
   const source =
     `const SZS_MAX_SIZE=${SZS_MAX_SIZE};\n` +
@@ -55,6 +157,7 @@ function szsError(e) {
   toast(SZED.error, true);
 }
 function openSZSEditor() {
+  szsScheduleSync();
   openSheet('SZS · Track archive', buildSZSEditor, { panel: true, kind: 'szs' });
 }
 async function loadSZSEditor(bytes, name = 'course.szs') {
@@ -72,14 +175,20 @@ async function loadSZSEditor(bytes, name = 'course.szs') {
       search: '',
       page: 0,
       target: null,
+      auto: true,
+      sync: new Map(),
+      notice: '',
+      revision: SZED.revision + 1,
     });
+    SZED.busy = '';
+    szsSyncProject();
     return archive;
   } finally {
     SZED.busy = '';
     szsRefresh();
   }
 }
-function szsStage(id, bytes) {
+function szsStage(id, bytes, { project = false, refresh = true } = {}) {
   if (SZED.busy) throw new Error('Wait for the current archive operation');
   const node = SZED.archive?.nodes[id];
   if (!node || node.directory) throw new Error('Select an archive file');
@@ -101,8 +210,10 @@ function szsStage(id, bytes) {
       total += Math.ceil((n.id === id ? b.length : szsEntryBytes(SZED.archive, n.id, SZED.changes).length) / 32) * 32;
   if (total > SZS_MAX_SIZE) throw new Error('Updated archive exceeds 128 MiB');
   SZED.changes.set(id, b.slice());
+  SZED.revision++;
+  if (!project) szsPauseFile(id);
   SZED.error = '';
-  szsRefresh();
+  if (refresh) szsRefresh();
 }
 function szsProjectFile(name) {
   if (name === 'course.kcl') return exportKCL(trackTriangles()).bytes;
@@ -122,7 +233,7 @@ function szsProjectFile(name) {
 }
 function szsApplyProject(all = true) {
   if (!SZED.archive || SZED.busy) throw new Error('Open an archive and wait for it to finish loading');
-  const names = ['course_model.brres', 'course.kcl', 'course.kmp'];
+  const names = SZS_COURSE_FILES;
   const selected = SZED.archive.nodes[SZED.selected];
   const wanted = all ? names : [selected?.name.toLowerCase()];
   const edits = [];
@@ -141,35 +252,63 @@ function szsApplyProject(all = true) {
   const before = SZED.changes;
   SZED.changes = new Map(before);
   try {
-    for (const [id, bytes] of edits) szsStage(id, bytes);
+    for (const [id, bytes] of edits) szsStage(id, bytes, { project: true, refresh: false });
   } catch (e) {
     SZED.changes = before;
     szsRefresh();
     throw e;
   }
+  const keys = szsProjectKeys();
+  for (const [id] of edits) {
+    const name = SZED.archive.nodes[id].name.toLowerCase(), state = szsSyncState(name);
+    Object.assign(state, { key: keys[name], paused: false, error: '', updated: new Date().toLocaleTimeString() });
+    state.status = 'Updated ' + state.updated;
+  }
+  SZED.notice = 'Replaced from project: ' + edits.map(([id]) => SZED.archive.nodes[id].path).join(', ') + '. Save SZS to keep these changes.';
   szsRefresh();
   toast(edits.length + ' course file' + (edits.length === 1 ? '' : 's') + ' replaced. Save SZS to keep them.');
 }
 async function szsSave() {
   if (!SZED.archive || SZED.busy) return;
-  SZED.busy = 'Packing and compressing SZS…';
-  SZED.error = '';
-  szsRefresh();
   try {
+    if (szsEditing()) throw new Error('Finish the current edit before preparing the SZS.');
+    szsSyncProject({ force: true });
+    const problems = szsSyncProblems();
+    if (problems.length) throw new Error('SZS not prepared: ' + problems.join(', ') + ' could not update. Fix the file status, or choose Keep archive file to use its existing contents.');
+    const archive = SZED.archive, stamp = szsSaveStamp();
+    SZED.busy = 'Packing and compressing SZS…';
+    SZED.error = '';
+    szsRefresh();
     const bytes = await szsWorker('save', { archive: SZED.archive, changes: SZED.changes });
     // Keep sharing within a fresh tap on iOS, after compression completes.
     SZED.busy = '';
     szsRefresh();
+    const current = () => SZED.archive === archive && szsSaveStamp() === stamp && !szsEditing();
+    if (!current()) {
+      szsSyncProject();
+      openSZSEditor();
+      toast('Project changed while packing. Course files refreshed; prepare the SZS again.');
+      return;
+    }
     const name = safeFileName(SZED.name.replace(/\.(szs|u8|arc)$/i, '')) + '_edited.szs';
     openSheet('SZS ready', (body) =>
       body.append(
         h('p', {}, name + ' · ' + brresSize(bytes.length)),
-        trackButton('Save & Send SZS…', () => shareOrDownload(name, bytes), true),
+        h('p', { class: 'muted' }, (SZED.auto ? 'Automatic course updates checked before packing. ' : '') + SZED.notice),
+        trackButton('Save & Send SZS…', () => {
+          if (!current()) {
+            toast('Project changed. Preparing an updated SZS…');
+            szsSave();
+            return;
+          }
+          shareOrDownload(name, bytes);
+        }, true),
         trackButton('Back to SZS editor', openSZSEditor),
       ),
     );
   } catch (e) {
     SZED.busy = '';
+    if (SHEET.kind !== 'szs') openSZSEditor();
     szsError(e);
   }
 }
@@ -235,10 +374,43 @@ function buildSZSEditor(body) {
       h(
         'p',
         { class: 'muted' },
-        'Replaces course_model.brres, course.kcl and course.kmp together, using the shared Wii scale. Other resources, object files and paths are preserved. Their positions may need adjustment for your new track.',
+        'Course files use the shared Wii scale. Other archive resources and paths are preserved.',
       ),
     ),
   );
+  const syncCard = h('div', { class: 'card', 'aria-label': 'Automatic course file updates' },
+    checkInput('Automatically update course files', SZED.auto, (value) => {
+      SZED.auto = value;
+      SZED.revision++;
+      SZED.notice = value ? 'Automatic updates enabled.' : 'Automatic updates paused. Saving will use the files currently staged in this archive.';
+      if (value) szsSyncProject({ force: true });
+      else { clearTimeout(szsSyncTimer); szsRefresh(); }
+    }),
+    h('p', { class: 'muted' }, 'Updates the course model, collision and start/checkpoints after project edits, undo/redo, and before download. Manual replacements pause updates for that file.'),
+    h('p', { id: 'szsSyncNotice', role: 'status', 'aria-live': 'polite' }, SZED.notice ||
+      (SZS_COURSE_FILES.every((name) => SZED.sync.get(name)?.key) ? 'Course files match the current project.' : 'Waiting for project edits to finish.')),
+  );
+  for (const name of SZS_COURSE_FILES) {
+    const state = szsSyncState(name);
+    syncCard.append(h('div', { 'data-szs-sync': name },
+      h('strong', {}, name),
+      h('p', { class: state.error ? 'brres-error' : 'muted' },
+        !SZED.auto ? 'Automatic updates off' : state.status),
+      szsButton((state.paused ? 'Resume automatic updates · ' : 'Keep archive file · ') + name, () => {
+        state.paused = !state.paused;
+        state.error = '';
+        state.key = null;
+        state.status = 'Paused · keeping the archive file';
+        SZED.revision++;
+        if (!state.paused) { SZED.auto = true; szsSyncProject({ force: true }); }
+        else {
+          SZED.notice = name + ': automatic updates paused. Its current archive contents will be saved.';
+          szsRefresh();
+        }
+      }),
+    ));
+  }
+  body.append(syncCard);
   const search = h('input', {
       type: 'search',
       placeholder: 'Search file paths or types…',
@@ -333,6 +505,8 @@ function buildSZSEditor(body) {
       card.append(
         szsButton('Revert selected file', () => {
           SZED.changes.delete(n.id);
+          SZED.revision++;
+          szsPauseFile(n.id);
           SZED.error = '';
           szsRefresh();
         }),
@@ -354,6 +528,11 @@ function buildSZSEditor(body) {
     body.append(
       szsButton('Revert all replacements', () => {
         SZED.changes.clear();
+        SZED.revision++;
+        SZED.auto = false;
+        SZED.sync.clear();
+        clearTimeout(szsSyncTimer);
+        SZED.notice = 'All original files restored. Automatic updates are off; enable them above to use the project again.';
         SZED.error = '';
         szsRefresh();
       }),

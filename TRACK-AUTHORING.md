@@ -297,10 +297,21 @@ and [Lorenzi's checkpoint editor](https://github.com/hlorenzi/kmp-editor/blob/ma
 1. Tap **Track Editor → SZS** in the option bar or File menu. Open an
    existing `.szs` (Yaz0-compressed U8) or uncompressed `.u8`/`.arc` track archive.
    Browse all folders/files or search by path/type; large listings are paginated.
+   **Automatically update course files** starts enabled for each opened archive.
+   It inserts the current project on opening, then refreshes `course_model.brres`,
+   `course.kcl` and `course.kmp` after committed edits and undo/redo. Geometry,
+   transforms, modifiers, materials, images/downscaling, collision flags, start
+   points, checkpoints and shared export scale are tracked. Identical exported
+   bytes are left alone; camera and selection changes do not replace files.
+   A notification names the updated files, and each file has a persistent status
+   and update time. These are staged in memory; save the SZS copy to retain them.
 2. Select a file and choose **Replace selected file…**. The archive path stays
    the same regardless of the uploaded filename. **Download selected file** extracts
    its current bytes. **Revert selected file** or **Revert all replacements** restores
-   the originally opened version.
+   the originally opened version. Manual course replacements (including BRRES
+   editor replacements) and individual reverts pause automatic updates for that
+   file. **Resume automatic updates** returns it to the current project. Reverting
+   all files turns automatic updates off so the restored files stay intact.
 3. **Use current project course files** exports all visible scene objects/materials
    to `course_model.brres`, material collision to `course.kcl`, and the current
    start/KMP setup to `course.kmp`, using the shared Wii scale. All three must
@@ -316,6 +327,12 @@ and [Lorenzi's checkpoint editor](https://github.com/hlorenzi/kmp-editor/blob/ma
    Reopen the saved copy to inspect it. Pending archive edits are separate from
    project autosave and are lost when closing/reloading the app or opening another
    valid archive. Invalid imports preserve the current archive and replacements.
+   Automatic mode checks for changes again before packing. If a file cannot be
+   exported, its last valid bytes remain intact and its status explains the error;
+   saving is blocked until it is fixed or **Keep archive file** explicitly retains
+   that file. Missing or duplicate destinations are never guessed. Updates to
+   the other valid files still proceed. Changes during compression invalidate the
+   prepared copy; changes after compression trigger repacking on the share tap.
 
 Untouched file bytes, names, directory hierarchy, empty directories and node order
 are preserved. Repacking updates file offsets/sizes and aligns data to 32 bytes.
@@ -336,6 +353,9 @@ file downloads, KMP import and project/undo behavior.
 back-facing and disabled-collision surfaces, camera/transform gestures, material
 image previews, SZS import/search/pagination, replacement/revert, atomic course
 export, error preservation, worker compression and downloaded archive contents.
+`npm run test:szs-sync:browser` covers desktop and emulated iPhone automatic
+updates, texture downscaling, checkpoints, scale, undo/redo, manual overrides,
+failure retention, missing/duplicate destinations and stale-download prevention.
 `WIIMM_BIN=/path/to/wiimm/bin node test/szs.test.mjs` additionally checks
 independent extraction/repacking by Wiimm. Empty files are tested directly;
 Wiimm’s extractor treats zero-length entries as extending to the next offset.
