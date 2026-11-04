@@ -7469,7 +7469,7 @@ function applyCamera() {
   _m4.makeBasis(x, y, z);
   for (const c of [persp, ortho]) { c.position.copy(pos); c.quaternion.setFromRotationMatrix(_m4); }
   persp.fov = CAM.fov; persp.aspect = w / h;
-  persp.near = clamp(CAM.dist * 0.002, 0.0005, 1); persp.far = CAM.dist * 100 + 2000;
+  persp.near = clamp(CAM.dist * 0.001, 1e-8, 1); persp.far = CAM.dist * 100 + 2000;
   persp.updateProjectionMatrix();
   const hh = CAM.dist * Math.tan((CAM.fov * DEG) / 2);
   ortho.left = -hh * (w / h); ortho.right = hh * (w / h); ortho.top = hh; ortho.bottom = -hh;
@@ -7495,7 +7495,49 @@ function pan(dx, dy) {
   CAM.target.addScaledVector(x, -dx * s).addScaledVector(y, dy * s);
   applyCamera();
 }
-function zoom(f) { CAM.anim = null; CAM.dist = clamp(CAM.dist * f, 0.01, 20000); applyCamera(); }
+function zoom(f, point) {
+  if (!Number.isFinite(f) || f <= 0 || f === 1) return;
+  CAM.anim = null;
+  const {w,h} = viewSize(), {x,y,z} = camBasis();
+  const px = clamp(point?.x ?? w/2, 0, w), py = clamp(point?.y ?? h/2, 0, h);
+  scene.updateMatrixWorld(true);
+  const ray = screenRay(px,py);
+  // Orthographic views can render geometry behind the camera's position.
+  // Begin at their near plane so elevated tracks are still focus targets.
+  if (CAM.ortho) {
+    ray.ray.origin.addScaledVector(z, -camera.near);
+    ray.far = camera.far - camera.near;
+  }
+  const hit = ray.intersectObjects(S.objects.filter(o=>o.visible).map(o=>o.meshNode),false)[0];
+  let anchor;
+  if (hit) {
+    anchor = hit.point;
+    if (CAM.ortho) {
+      // Changing target depth alone leaves an orthographic image stationary.
+      CAM.target.addScaledVector(z, anchor.clone().sub(CAM.target).dot(z));
+    } else {
+      const depth = camera.position.clone().sub(anchor).dot(z);
+      if (depth > 0) {
+        // Rebase the orbit center onto the surface without moving the camera.
+        // Zoom can then approach an elevated road instead of passing through it
+        // on its way to an old target beneath/behind the track.
+        CAM.dist = depth;
+        CAM.target.copy(camera.position).addScaledVector(z, -depth);
+      }
+    }
+  } else {
+    // Empty space keeps the existing target plane (including loose geometry).
+    const units = 2 * CAM.dist * Math.tan(CAM.fov * DEG / 2) / h;
+    anchor = CAM.target.clone().addScaledVector(x, (px-w/2)*units).addScaledVector(y, (h/2-py)*units);
+  }
+  // Keep positive distance and a few float32 render-buffer precision steps at
+  // large track coordinates, where smaller offsets would round into the road.
+  const minDistance = Math.max(1e-5, Math.max(...CAM.target.toArray().map(Math.abs)) * 2 ** -23 * 4);
+  const next = clamp(CAM.dist * f, minDistance, 1e9), ratio = next / CAM.dist;
+  CAM.target.sub(anchor).multiplyScalar(ratio).add(anchor);
+  CAM.dist = next;
+  applyCamera();
+}
 function animateCam(to, ms = 220) {
   const from = { yaw: CAM.yaw, pitch: CAM.pitch, dist: CAM.dist, target: CAM.target.clone() };
   if (to.yaw !== undefined) {
@@ -12922,8 +12964,13 @@ c3d.addEventListener('pointermove', (e) => {
       CAM.pitch = clamp(CAM.pitch + (t.my - G.two.my) * 0.008, -Math.PI / 2, Math.PI / 2);
       if (CAM.autoOrtho) { CAM.ortho = false; CAM.autoOrtho = false; updateViewButtons(); }
       applyCamera();
-    } else pan(t.mx - G.two.mx, t.my - G.two.my);
-    if (G.two.d > 10 && t.d > 10) zoom(G.two.d / t.d);
+      if (G.two.d > 10 && t.d > 10) zoom(G.two.d / t.d, {x:t.mx,y:t.my});
+    } else {
+      // Focus before panning so finger motion uses the surface's new depth.
+      // Pointer events arrive one finger at a time even for a symmetric pinch.
+      if (G.two.d > 10 && t.d > 10) zoom(G.two.d / t.d, {x:G.two.mx,y:G.two.my});
+      pan(t.mx - G.two.mx, t.my - G.two.my);
+    }
     if (G.twisting && dth) twistView(dth);
     G.two = t; CAM.viewName = CAM.ortho && CAM.autoOrtho && !G.twisting ? CAM.viewName : null;
     return;
@@ -12986,7 +13033,7 @@ function cancelViewportGesture() { circleEnd(true); circleCursor(null); cancelHo
 window.addEventListener('blur', cancelViewportGesture);
 document.addEventListener('visibilitychange', () => { if (document.hidden) cancelViewportGesture(); });
 c3d.addEventListener('pointerleave', () => { if (!CIRCLE.stroke) circleCursor(null); });
-c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (circleActive()) { circleRadius(CIRCLE.radius + (e.deltaY < 0 ? 4 : -4)); return; } if (e.ctrlKey) zoom(Math.exp(e.deltaY * 0.01)); else zoom(Math.exp(e.deltaY * 0.0015)); }, { passive: false });
+c3d.addEventListener('wheel', (e) => { e.preventDefault(); if (circleActive()) { circleRadius(CIRCLE.radius + (e.deltaY < 0 ? 4 : -4)); return; } zoom(Math.exp(e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), rel(e)); }, { passive: false });
 document.addEventListener('gesturestart', (e) => e.preventDefault());
 document.addEventListener('gesturechange', (e) => e.preventDefault());
 
